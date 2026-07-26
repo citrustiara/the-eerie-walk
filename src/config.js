@@ -90,7 +90,7 @@ export const PLAYER = {
   sprintRegen: 0.34,    // fraction of the bar per second while not sprinting
   sprintFloor: 0.22,    // once empty, this much must come back before you can go again
   mouseSensitivity: 0.0022,
-  maxPitch: 220,        // clamp for vertical look, in screen pixels of horizon shift
+  maxPitch: 360,        // wide vertical look, in screen pixels of horizon shift
   bobFrequency: 9.2,    // head-bob speed while walking
   bobAmount: 2.6,       // head-bob vertical pixels
   eyeHeight: 0.5,       // 0..1 within the wall height == 1.5 m

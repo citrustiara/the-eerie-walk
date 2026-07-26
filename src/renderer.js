@@ -305,8 +305,8 @@ export class Renderer {
     const anyPits = world.anyPitNear(posX, posY);
     const pitK = 1 + PIT.depth / eye;
 
-    // The horizon is allowed to leave the screen entirely — pitch swings 220 px
-    // on a 270 px buffer — so both halves are clamped rather than assumed.
+    // The horizon is allowed to leave the screen entirely — pitch swings well
+    // past a 270 px buffer — so both halves are clamped rather than assumed.
     const hy = Math.floor(horizon);
     const floorY0 = hy + 1 < 0 ? 0 : hy + 1;
     const ceilY1 = hy + 1 > H ? H : hy + 1;
