@@ -812,6 +812,7 @@ export class Renderer {
     const baseA = face.a == null ? 1 : face.a;
     const bloodK = inst.bloodK || 0;
     const emit = face.emit;
+    const emitScale = inst.emitScale == null ? 1 : inst.emitScale;
     const dim = inst.dim == null ? 1 : inst.dim;
     // How fast an emissive face dims with range. The default buries the
     // creature's eyes past about ten metres, which is right for something you
@@ -868,9 +869,9 @@ export class Renderer {
           // distance, or a pair of red points reads the same at four metres and
           // at twenty, and the approach stops meaning anything.
           const k = 1 / (1 + depth * emitK);
-          const er = Math.min(255, (litc & 255) + emit[0] * k);
-          const eg = Math.min(255, ((litc >> 8) & 255) + emit[1] * k);
-          const eb = Math.min(255, ((litc >> 16) & 255) + emit[2] * k);
+          const er = Math.min(255, (litc & 255) + emit[0] * emitScale * k);
+          const eg = Math.min(255, ((litc >> 8) & 255) + emit[1] * emitScale * k);
+          const eb = Math.min(255, ((litc >> 16) & 255) + emit[2] * emitScale * k);
           litc = (0xff000000 | ((eb | 0) << 16) | ((eg | 0) << 8) | (er | 0)) >>> 0;
         }
         buf[idx] = litc;

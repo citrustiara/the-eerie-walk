@@ -538,6 +538,23 @@ function bloodPool(rad) {
   return slab(rad, 0.006, [60, 10, 9], 'blood', { n: 16, a: 0.68, pool: true, wobble: 0.3 });
 }
 
+// One working ceiling panel, used only above the empty place in a terminal
+// crowd formation. The ordinary ceiling texture already has dead fixtures in
+// it; this is a small solid hung just below that plane so its position can be
+// authored by the anomaly instead of landing on the texture's repeating grid.
+function crowdCeilingLight() {
+  return [
+    ...box(-0.34, -0.18, -0.038, 0.34, 0.18, 0,
+      [38, 38, 34], { mat: 'metal' }),
+    face([
+      [-0.285, -0.125, -0.040],
+      [0.285, -0.125, -0.040],
+      [0.285, 0.125, -0.040],
+      [-0.285, 0.125, -0.040],
+    ], [204, 196, 166], 'glass', { emit: [190, 174, 126] }),
+  ];
+}
+
 // ---------------------------------------------------------------------------
 
 // key -> [builder, opts]. `props` lists the ones the world scatterer may use.
@@ -592,5 +609,6 @@ export function buildMeshes() {
   out.bulletHole = toWorld(bulletHole());
   out.bloodPool = bloodPool(0.55);
   out.bloodSmall = bloodPool(0.26);
+  out.crowdCeilingLight = toWorld(crowdCeilingLight());
   return out;
 }

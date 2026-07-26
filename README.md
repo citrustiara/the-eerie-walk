@@ -652,7 +652,8 @@ you and it.
   - *crowd* — the ceiling lights reveal ranks lining a real walkable route
     toward the unfound gun or an unused landmark. The centre aisle is safe.
     One person-sized place in a ritual-bound rank is empty; deliberately
-    standing there and facing with them produces **the congregation** ending
+    standing beneath its single working ceiling panel and facing with them
+    produces **the congregation** ending
 
 Everything is gated behind a rising `dread` value, so the first minute is calm
 and the place only turns on you later.

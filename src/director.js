@@ -1644,6 +1644,7 @@ export class Director {
           a.join = {
             x, y, yaw,
             terminal: target.kind === 'ritual',
+            ceilingZ: this.world.ceilHeight(Math.floor(x), Math.floor(y)),
           };
           continue;
         }
@@ -1890,6 +1891,18 @@ export class Director {
           fx.meshes.push({
             x: f.x, y: f.y, yaw: f.yaw, key: 'crowd',
             mesh: this.crowdMesh, seed: 0x2b7, dim: 0.30 + fade * 0.70,
+          });
+        }
+        if (a.join?.terminal) {
+          // The rest of the panels illuminate the scene; this one identifies
+          // the choice. It occupies the real ceiling plane directly over the
+          // missing member and pulses just enough to be noticed as deliberate.
+          const pulse = fade * (0.86 + Math.sin(a.t * 3.4) * 0.14);
+          fx.meshes.push({
+            x: a.join.x, y: a.join.y, z: a.join.ceilingZ,
+            yaw: a.join.yaw, key: 'crowdCeilingLight',
+            seed: 0xc011ec7, dim: 0.35 + fade * 0.65,
+            emitScale: pulse, emitFar: 0.08,
           });
         }
         fx.ambient = LIGHT.ambient * (1 + env * 9);
