@@ -16,11 +16,19 @@ export class Input {
     this.onSelectGun = null;
     this.onDebugSpawn = null;
     this.onActivate = null;   // fired on the click that requests lock (gesture)
+    this.onFire = null;       // left mouse, only while the pointer is locked
 
     window.addEventListener('keydown', (e) => this._onKey(e, true));
     window.addEventListener('keyup', (e) => this._onKey(e, false));
     document.addEventListener('mousemove', (e) => this._onMove(e));
     document.addEventListener('pointerlockchange', () => this._onLockChange());
+
+    // Once the pointer is locked, the left button is the trigger — so the same
+    // click must not also be read as "give me pointer lock again".
+    document.addEventListener('mousedown', (e) => {
+      if (!this.locked || e.button !== 0) return;
+      if (this.onFire) this.onFire();
+    });
 
     // Click anywhere to (re)acquire pointer lock. We listen at the document
     // level on purpose: the start/pause overlay sits *above* the canvas, so a
@@ -32,6 +40,9 @@ export class Input {
       const p = canvas.requestPointerLock();
       if (p && typeof p.catch === 'function') p.catch(() => {}); // ignore rejects
     });
+
+    // The browser context menu would break the pointer lock illusion.
+    document.addEventListener('contextmenu', (e) => { if (this.locked) e.preventDefault(); });
   }
 
   _onKey(e, down) {

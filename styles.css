@@ -69,14 +69,151 @@ html, body {
   opacity: 1;
 }
 
-/* Overlay */
+/* Ammo readout — bottom right, dim, only present once the gun is out. */
+#hud {
+  position: absolute;
+  right: 2.2rem;
+  bottom: 1.8rem;
+  text-align: right;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.4s ease;
+  font-variant-numeric: tabular-nums;
+}
+
+#hud.visible { opacity: 1; }
+
+#ammo-pips {
+  display: flex;
+  gap: 3px;
+  justify-content: flex-end;
+  margin-bottom: 0.4rem;
+}
+
+.pip {
+  width: 3px;
+  height: 11px;
+  background: rgba(228, 222, 206, 0.82);
+  box-shadow: 0 0 5px rgba(255, 236, 190, 0.30);
+  transition: background 0.18s ease, box-shadow 0.18s ease;
+}
+
+.pip.spent {
+  background: rgba(120, 116, 106, 0.20);
+  box-shadow: none;
+}
+
+#ammo-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: flex-end;
+  gap: 0.4rem;
+}
+
+#ammo-count {
+  font-size: 1.5rem;
+  font-weight: 300;
+  letter-spacing: 0.02em;
+  color: rgba(232, 226, 210, 0.9);
+}
+
+#ammo-label {
+  font-size: 0.6rem;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: rgba(150, 146, 136, 0.7);
+}
+
+#hud.low #ammo-count { color: rgba(226, 168, 96, 0.95); }
+
+#hud.empty #ammo-count,
+#hud.empty #ammo-label { color: rgba(178, 66, 56, 0.9); }
+
+/* The creature reaching you: a hard red bleed in from the frame edges. */
+body.caught #stage::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: radial-gradient(ellipse at center,
+    rgba(120, 0, 0, 0) 35%, rgba(120, 0, 0, 0.55) 78%, rgba(60, 0, 0, 0.9) 100%);
+  animation: caught-pulse 1.4s ease-out forwards;
+}
+
+@keyframes caught-pulse {
+  0%   { opacity: 1; }
+  70%  { opacity: 0.8; }
+  100% { opacity: 0; }
+}
+
+/* Stamina — bottom left, opposite the ammo. Hidden until the hunter gives you
+   a reason to have it, and it turns amber as it empties so you can feel the
+   thing you are losing without having to look away from the corridor. */
+#stamina {
+  position: absolute;
+  left: 2.2rem;
+  bottom: 1.8rem;
+  width: 8.5rem;
+  height: 3px;
+  background: rgba(120, 116, 106, 0.22);
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.5s ease;
+}
+
+#stamina.visible { opacity: 1; }
+
+#stamina-fill {
+  height: 100%;
+  width: 100%;
+  transform-origin: left center;
+  background: rgba(228, 222, 206, 0.85);
+  box-shadow: 0 0 6px rgba(255, 236, 190, 0.28);
+  transition: background 0.25s ease;
+}
+
+#stamina.low #stamina-fill { background: rgba(226, 168, 96, 0.95); }
+#stamina.spent #stamina-fill { background: rgba(178, 66, 56, 0.9); box-shadow: none; }
+
+/* One line of text, low and centred, when the building answers a gunshot. */
+#subtitle {
+  position: absolute;
+  left: 50%;
+  bottom: 31%;              /* clear of the weapon in the lower right */
+  transform: translateX(-50%);
+  max-width: 24rem;
+  text-align: center;
+  font-size: 0.78rem;
+  font-weight: 400;
+  letter-spacing: 0.24em;
+  text-transform: lowercase;
+  color: rgba(206, 198, 186, 0.92);
+  text-shadow: 0 0 14px rgba(0, 0, 0, 0.95), 0 1px 2px rgba(0, 0, 0, 0.9);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 1.1s ease, letter-spacing 6s linear;
+}
+
+#subtitle.visible {
+  opacity: 1;
+  letter-spacing: 0.34em;   /* creeps apart while you read it */
+}
+
+/* --------------------------------------------------------------------------
+   Overlay — start and pause. Same layout for both; only the words change.
+   The controls used to be one run-on sentence of separator dots, which read
+   as placeholder text. They are a proper key/action table now: keycaps on the
+   left, what the key does on the right, hairline rules top and bottom.
+   -------------------------------------------------------------------------- */
 #overlay {
   position: absolute;
   inset: 0;
   display: flex;
   align-items: center;
   justify-content: center;
-  background: radial-gradient(circle at center, rgba(0,0,0,0.55) 0%, rgba(0,0,0,0.86) 100%);
+  background:
+    radial-gradient(ellipse at center, rgba(0,0,0,0.62) 0%, rgba(0,0,0,0.93) 100%);
+  backdrop-filter: blur(2px) saturate(0.7);
   transition: opacity 0.6s ease;
   cursor: pointer;
 }
@@ -88,33 +225,135 @@ html, body {
 
 #overlay-inner {
   text-align: center;
-  max-width: 30rem;
-  padding: 2rem;
+  width: min(30rem, 88vw);
+  padding: 2rem 1.5rem;
+}
+
+#overlay-eyebrow {
+  font-size: 0.6rem;
+  font-weight: 500;
+  letter-spacing: 0.42em;
+  text-indent: 0.42em;      /* balances the trailing letter-space */
+  text-transform: uppercase;
+  color: rgba(150, 138, 96, 0.75);
+  margin-bottom: 0.9rem;
 }
 
 #overlay-title {
-  font-size: 2.4rem;
-  font-weight: 600;
-  letter-spacing: -0.01em;
+  font-size: clamp(1.7rem, 6vw, 2.5rem);
+  font-weight: 200;
+  letter-spacing: 0.12em;
+  text-indent: 0.12em;
+  text-transform: lowercase;
   color: #ece8dc;
-  margin-bottom: 1rem;
-}
-
-#overlay-hint {
-  font-size: 0.95rem;
-  font-weight: 400;
-  color: #b9b6ac;
-  margin-bottom: 1.25rem;
+  margin-bottom: 1.1rem;
 }
 
 #overlay-note {
-  font-size: 0.85rem;
+  font-size: 0.8rem;
   font-weight: 400;
-  color: #6f6d66;
-  line-height: 1.5;
+  line-height: 1.65;
+  color: #7d7a72;
+  max-width: 24rem;
+  margin: 0 auto;
 }
 
-@media (max-width: 520px) {
-  #overlay-title { font-size: 1.8rem; }
-  #overlay-hint, #overlay-note { font-size: 0.8rem; }
+/* --- the control table --- */
+#controls {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.55rem 2rem;
+  margin: 1.8rem auto 1.6rem;
+  padding: 1.35rem 0;
+  border-top: 1px solid rgba(236, 232, 220, 0.10);
+  border-bottom: 1px solid rgba(236, 232, 220, 0.10);
+  text-align: left;
+}
+
+.ctl {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  min-width: 0;
+}
+
+.ctl dt {
+  display: flex;
+  gap: 2px;
+  flex: none;
+}
+
+.ctl dd {
+  font-size: 0.72rem;
+  letter-spacing: 0.06em;
+  color: rgba(160, 156, 146, 0.85);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+kbd {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.35rem;
+  height: 1.35rem;
+  padding: 0 0.34rem;
+  font-family: inherit;
+  font-size: 0.6rem;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: rgba(226, 220, 205, 0.9);
+  background: rgba(236, 232, 220, 0.055);
+  border: 1px solid rgba(236, 232, 220, 0.16);
+  border-radius: 3px;
+  box-shadow: inset 0 -1px 0 rgba(0, 0, 0, 0.5);
+}
+
+kbd.wide { min-width: auto; letter-spacing: 0.1em; }
+
+#overlay-action {
+  font-size: 0.72rem;
+  letter-spacing: 0.28em;
+  text-indent: 0.28em;
+  text-transform: lowercase;
+  color: rgba(214, 208, 194, 0.85);
+  animation: breathe 3.4s ease-in-out infinite;
+}
+
+@keyframes breathe {
+  0%, 100% { opacity: 0.45; }
+  50%      { opacity: 1; }
+}
+
+/* --- the death screen ------------------------------------------------------
+   The same overlay, with everything warm taken out of it and the control table
+   hidden — you already know the controls, and none of them were the problem.
+   It fades up out of black over a second and a half rather than appearing,
+   because it arrives while the screen is already black and the transition is
+   the only thing telling you the game is over rather than loading. */
+#overlay.dead {
+  background: radial-gradient(ellipse at center, rgba(4,3,3,0.94) 0%, rgba(0,0,0,1) 100%);
+  backdrop-filter: none;
+  animation: death-in 1.6s ease-out both;
+}
+
+/* The control table carried the space above the action line, so hiding it needs
+   that space put back by hand. */
+#overlay.dead #controls { display: none; }
+#overlay.dead #overlay-action { margin-top: 2.4rem; }
+
+#overlay.dead #overlay-eyebrow { color: rgba(126, 62, 52, 0.8); }
+#overlay.dead #overlay-title   { color: #b8ada4; }
+
+@keyframes death-in {
+  0%   { opacity: 0; }
+  35%  { opacity: 0; }
+  100% { opacity: 1; }
+}
+
+@media (max-width: 560px) {
+  #controls { grid-template-columns: 1fr; gap: 0.5rem; }
+  #overlay-note { font-size: 0.74rem; }
 }

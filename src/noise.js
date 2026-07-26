@@ -4,7 +4,24 @@
 import { hash2, smoothstep, lerp } from './mathutils.js';
 
 let SEED = 1337;
-export function setNoiseSeed(seed) { SEED = seed >>> 0; }
+let SALT_X = 11.3, SALT_Y = 7.9;
+let EPOCH = 0;
+export function setNoiseSeed(seed) {
+  SEED = seed >>> 0;
+  SALT_X = (SEED & 0xffff) * 0.01373 + 11.3;
+  SALT_Y = ((SEED >>> 16) & 0xffff) * 0.01907 + 7.9;
+  EPOCH++;
+}
+
+// Bumped every time the seed changes, so anything memoising a seed-dependent
+// answer can tell that its cache is from a different world.
+export function noiseEpoch() { return EPOCH; }
+
+// A pair of per-session offsets for callers that pick things with a plain hash
+// rather than with the noise field. Without this the district and landmark
+// layout is identical in every session — only the fBm-driven interiors change —
+// so the ward is always in the same place relative to where you started.
+export function seedSalt() { return [SALT_X, SALT_Y]; }
 
 // Hash that folds the global seed in, so a new session reshapes the world.
 function h(x, y) {

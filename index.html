@@ -15,12 +15,40 @@
     <div id="reticle"></div>
     <div id="gun-hint">press 1 to pull out the gun</div>
 
+    <!-- One short line, when the building wants you to know something. -->
+    <div id="subtitle"></div>
+
+    <!-- Stamina. Does not exist until something makes it necessary. -->
+    <div id="stamina"><div id="stamina-fill"></div></div>
+
+    <!-- Ammo readout. Twelve rounds, no reload. -->
+    <div id="hud">
+      <div id="ammo-pips"></div>
+      <div id="ammo-row">
+        <span id="ammo-count">12</span>
+        <span id="ammo-label">rounds</span>
+      </div>
+    </div>
+
     <!-- Start / pause overlay -->
     <div id="overlay">
       <div id="overlay-inner">
+        <p id="overlay-eyebrow">level 0</p>
         <h1 id="overlay-title">the backrooms</h1>
-        <p id="overlay-hint">click to enter. wasd move · mouse look · f flashlight · 1 equip · esc release</p>
-        <p id="overlay-note">use headphones. the flashlight is the only thing keeping the dark out.</p>
+        <p id="overlay-note">use headphones. the flashlight is the only thing keeping
+          the dark out, there are twelve rounds in the whole building, and the floor
+          is not everywhere.</p>
+
+        <dl id="controls">
+          <div class="ctl"><dt><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd></dt><dd>move</dd></div>
+          <div class="ctl"><dt><kbd class="wide">mouse</kbd></dt><dd>look</dd></div>
+          <div class="ctl"><dt><kbd>F</kbd></dt><dd>flashlight</dd></div>
+          <div class="ctl"><dt><kbd>1</kbd></dt><dd>draw the gun</dd></div>
+          <div class="ctl"><dt><kbd class="wide">click</kbd></dt><dd>fire</dd></div>
+          <div class="ctl"><dt><kbd class="wide">esc</kbd></dt><dd>pause</dd></div>
+        </dl>
+
+        <p id="overlay-action">click to enter</p>
       </div>
     </div>
   </div>
