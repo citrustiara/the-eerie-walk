@@ -377,7 +377,7 @@ function step(dt, t) {
     renderStamina();
   }
   const fx = director.update(dt, t);
-  document.body.classList.toggle('refusing', fx.refusal > 0);
+  document.body.classList.toggle('refusing', !isOver() && fx.refusal > 0);
   // The torch goes out on the way down, and nothing the director wanted to do
   // to the light matters after that.
   const fallDark = player.fallDark();

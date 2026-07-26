@@ -553,6 +553,12 @@ Two to four seconds later — long enough that you have started to relax — you
 a line of text, a sound a long way off, and something walking in from a
 direction you cannot see. That is the real price of the twelve.
 
+There is one deliberately slower use of the trigger. With a live round, lower
+the view almost as far as it goes and hold the mouse button: the weapon turns
+inward over 1.35 seconds. Looking away or releasing lowers it without firing.
+Following through spends the round, cuts the frame to black and records
+**the refusal** ending; it does not summon the hunter.
+
 ### How things leave
 
 One clean fade to black is a transition. It tells you the game has decided the

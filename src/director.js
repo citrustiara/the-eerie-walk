@@ -1526,6 +1526,7 @@ export class Director {
     this.scareT = 0;
     this.scareDur = 0;
     this.refusalHeld = false;
+    this.refusalProgress = 0;
     this.refusalDeathT = 0;
     this.audio.setBreath(0);
     this.audio.setHeartbeat(0);
@@ -2063,7 +2064,10 @@ export class Director {
     fx.stress = 1;
     fx.darkFlash = clamp((progress - 0.08) / 0.45, 0, 1);
     this._updateShake(dt, fx);
-    if (this.refusalDeathT <= 0) this._die();
+    if (this.refusalDeathT <= 0) {
+      fx.refusal = 0;
+      this._die();
+    }
   }
 
   // ==========================================================================

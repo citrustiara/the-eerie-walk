@@ -260,7 +260,10 @@ export class Renderer {
     const swayX = Math.sin(env.time * LIGHT.flashlightSwaySpeed) * LIGHT.flashlightSwayAmount;
     const swayY = Math.cos(env.time * LIGHT.flashlightSwaySpeed * 0.7) * LIGHT.flashlightSwayAmount * 0.6;
     const beamCX = W * 0.5 + swayX + player.bobRoll * 2;
-    const beamCY = horizon + swayY;
+    // Pitch moves the projected horizon, not the player's screen-space aim.
+    // Keeping the beam on the crosshair lets the expanded vertical range light
+    // the floor and ceiling instead of throwing the torch cone off-screen.
+    const beamCY = H * 0.5 + swayY;
     const invRX = 1 / (W * LIGHT.beamRadiusX);
     const invRY = 1 / (H * LIGHT.beamRadiusY);
     const beamI = env.flashlightOn ? env.beamIntensity : 0;
@@ -1005,9 +1008,9 @@ export class Renderer {
 
   // ---------------------------------------------------------------------------
   // The viewmodel. Held low and right with the muzzle angled slightly inward,
-  // driven by four things: idle breathing, walk sway, a recoil spring, and a
-  // slide that actually cycles. Its own depth buffer means it composites over
-  // the world without any of the world's geometry poking through it.
+  // driven by idle movement, recoil, a slide that actually cycles, and the
+  // slow inward turn of the refusal ending. Its own depth buffer means it
+  // composites over the world without any geometry poking through it.
   // ---------------------------------------------------------------------------
   _drawHeldGun(player, env) {
     const frameMesh = this.meshes.gunFrame;
@@ -1026,6 +1029,8 @@ export class Renderer {
     const bob = Math.sin(walk) * 0.010 * moving + Math.sin(t * 1.9) * 0.0022;
     const swayX = Math.cos(walk * 0.5) * 0.014 * moving + Math.sin(t * 0.8) * 0.0030;
     const rec = this.recoil * this.recoil * GUN.recoil;
+    const refusal = clamp(env.refusal || 0, 0, 1);
+    const turn = refusal * refusal * (3 - 2 * refusal);
 
     // Pose. Local mesh space: +x muzzle, +y right, +z up.
     // originDepth is deliberately large relative to the weapon's 20 cm length:
@@ -1033,12 +1038,23 @@ export class Renderer {
     // edge while the muzzle stays near the middle, and the whole thing reads as
     // being carried sideways.
     const scale = 3.0;
-    const yaw = -0.105 + Math.sin(t * 0.7) * 0.010;   // muzzle angled slightly inward
-    const pitch = -0.04 + this.kickPitch * 0.34 + Math.sin(t * 1.1) * 0.008;
-    const roll = 0.17;                                 // shows the top-left of the slide
-    const originX = 0.156 + swayX + rec * 0.014;
-    const originDepth = 0.520 - rec * 0.060;
-    const originZ = -0.176 + bob + rec * 0.034;
+    const heldYaw = -0.105 + Math.sin(t * 0.7) * 0.010;
+    // Stop a little short of mathematically straight back: the slight angle
+    // keeps both the bore and enough of the slide visible to read the gesture.
+    const inwardYaw = -2.55;
+    const yawTurn = Math.sin(turn * Math.PI * 0.5);
+    const yaw = heldYaw + (inwardYaw - heldYaw) * yawTurn;
+    const heldPitch = -0.04 + this.kickPitch * 0.34 + Math.sin(t * 1.1) * 0.008;
+    const pitch = heldPitch * (1 - turn) + this.kickPitch * 0.18 * turn;
+    const roll = 0.17 * (1 - turn);
+    const heldX = 0.156 + swayX + rec * 0.014;
+    const inwardArc = Math.sin(turn * Math.PI);
+    const originX = heldX + (0.070 - heldX) * turn - inwardArc * 0.20;
+    const heldDepth = 0.520 - rec * 0.060;
+    const originDepth = heldDepth + (0.300 - heldDepth) * turn;
+    const heldZ = -0.176 + bob + rec * 0.034;
+    const lift = inwardArc * 0.075;
+    const originZ = heldZ + (-0.150 - heldZ) * turn + lift;
     const focal = H * 1.05;
     const screenCY = H * 0.5 + player.viewPitch() * 0.25;
 
@@ -1069,7 +1085,11 @@ export class Renderer {
     const light = [-0.30, 0.55, 0.78];
     // The gun is lit by your own torch — spill off the beam rather than the beam
     // itself — so it goes almost black when you switch the light off.
-    const key = (env.flashlightOn ? 1.38 : 0.28) + (env.muzzleFlash || 0) * 2.6;
+    // The hand and weapon remain legible while they turn even if the player
+    // switched the torch off; otherwise the confirmation gesture can happen
+    // invisibly in the one situation where it most needs to be readable.
+    const key = (env.flashlightOn ? 1.38 : 0.28) +
+      refusal * 1.35 + (env.muzzleFlash || 0) * 2.6;
 
     const collect = (mesh, extraX, seed) => {
       for (let fi = 0; fi < mesh.length; fi++) {
