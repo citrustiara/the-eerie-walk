@@ -1594,13 +1594,6 @@ export class Director {
     if (this.gunSite && !this.gunSite.pickedUp) {
       return { x: this.gunSite.x, y: this.gunSite.y, kind: 'gun' };
     }
-    if (this.pendingRitual) {
-      return {
-        x: this.pendingRitual.cx, y: this.pendingRitual.cy,
-        kind: 'ritual', landmark: this.pendingRitual.name,
-      };
-    }
-
     // An unused gun anchor is also a walkable point inside a recognisable room.
     // Lead the player there and entering the block arms its own landmark event.
     const anchor = this.world.nearestAnchor(
@@ -1657,7 +1650,7 @@ export class Director {
         a.figures.push({ x, y, yaw });
       }
     }
-    return a.figures.length >= 4;
+    return a.figures.length >= 4 && (target.kind !== 'ritual' || !!a.join);
   }
 
   _startAnomaly(forcedType = null, omen = null) {
@@ -1744,6 +1737,21 @@ export class Director {
             x: beaconX, y: beaconY, delay: 1.48, scale: 0.38, z: 0.62,
             startDist: beaconDist, beacon: true,
           });
+        } else if (a.eyes.length) {
+          // In a one-cell warren the target ray can hit a wall almost at once.
+          // Promote the already-visible pair closest to the true bearing rather
+          // than letting the directional sentence lose its final word.
+          let bestEye = a.eyes[0], bestAngle = Infinity;
+          for (const e of a.eyes) {
+            const angle = Math.abs(wrapAngle(
+              Math.atan2(e.y - p.y, e.x - p.x) - targetBearing
+            ));
+            if (angle < bestAngle) { bestAngle = angle; bestEye = e; }
+          }
+          bestEye.delay = 1.48;
+          bestEye.scale = Math.max(0.38, bestEye.scale);
+          bestEye.z = 0.62;
+          bestEye.beacon = true;
         }
         this.audio.playDrone({ freq: 39, dur: a.dur, volume: 0.14 });
         this.audio.playWhisper({ pan: -0.7, volume: 0.10 });

@@ -617,11 +617,13 @@ export class World {
     const cx0 = Math.floor(px), cy0 = Math.floor(py);
     let best = null, bestD = Infinity;
     const r = Math.ceil(radius);
+    const radius2 = radius * radius;
     for (let dy = -r; dy <= r; dy++) {
       for (let dx = -r; dx <= r; dx++) {
         const cx = cx0 + dx, cy = cy0 + dy;
         if ((this.flags(cx, cy) & flag) === 0) continue;
         const d = dx * dx + dy * dy;
+        if (d > radius2) continue;
         if (d < bestD) { bestD = d; best = { cx, cy }; }
       }
     }
