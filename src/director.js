@@ -1590,17 +1590,91 @@ export class Director {
     return null;
   }
 
+  _crowdTarget() {
+    if (this.gunSite && !this.gunSite.pickedUp) {
+      return { x: this.gunSite.x, y: this.gunSite.y, kind: 'gun' };
+    }
+    if (this.pendingRitual) {
+      return {
+        x: this.pendingRitual.cx, y: this.pendingRitual.cy,
+        kind: 'ritual', landmark: this.pendingRitual.name,
+      };
+    }
+
+    // An unused gun anchor is also a walkable point inside a recognisable room.
+    // Lead the player there and entering the block arms its own landmark event.
+    const anchor = this.world.nearestAnchor(
+      this.player.x, this.player.y, GUN.anchorRadius + 6, GUN_ANCHOR
+    );
+    if (!anchor) return null;
+    const landmark = this.world.landmarkAt(anchor.cx, anchor.cy);
+    if (!landmark) return null;
+    const center = this.world.blockCenter(anchor.cx, anchor.cy);
+    const key = `${Math.floor(center.x)},${Math.floor(center.y)}`;
+    if (this.landmarksUsed.has(key)) return null;
+    return {
+      x: anchor.cx + 0.5, y: anchor.cy + 0.5,
+      kind: 'ritual', landmark,
+    };
+  }
+
+  _buildCrowdRoute(a, target) {
+    const path = this._pathBetween(
+      this.player.x, this.player.y, target.x, target.y, 4096
+    );
+    if (!path || path.length < 3) return false;
+
+    a.target = target;
+    a.route = path;
+    a.figures = [];
+    const last = Math.min(path.length - 1, 7);
+    const joinIndex = Math.min(3, last);
+    const joinSide = 1;
+
+    for (let i = 1; i <= last; i++) {
+      const prev = path[Math.max(0, i - 1)];
+      const next = path[Math.min(path.length - 1, i + 1)];
+      const tx = next.cx - prev.cx, ty = next.cy - prev.cy;
+      const mag = Math.hypot(tx, ty) || 1;
+      const ux = tx / mag, uy = ty / mag;
+      const px = -uy, py = ux;
+      const bx = path[i].cx + 0.5, by = path[i].cy + 0.5;
+      const yaw = Math.atan2(uy, ux);
+
+      for (const side of [-1, 1]) {
+        const x = bx + px * side * 0.42;
+        const y = by + py * side * 0.42;
+        if (!this._openAt(x, y)) continue;
+        if (!a.join && i >= joinIndex && side === joinSide) {
+          // A literal missing member in one rank. Merely walking the centre
+          // aisle is safe; taking this side position and holding it is not.
+          a.join = {
+            x, y, yaw,
+            terminal: target.kind === 'ritual',
+          };
+          continue;
+        }
+        a.figures.push({ x, y, yaw });
+      }
+    }
+    return a.figures.length >= 4;
+  }
+
   _startAnomaly(forcedType = null, omen = null) {
     if (this.anomaly) return false;
     const guideTarget = this._anomalyTarget();
+    const crowdTarget = forcedType == null || forcedType === 'crowd'
+      ? this._crowdTarget() : null;
     if (forcedType === 'swarm' && !guideTarget) return false;
+    if (forcedType === 'crowd' && !crowdTarget) return false;
     // Weighted pick among the ones dread has unlocked.
     // Redshift is deliberately absent: it is started by _updateOmenWatch or by
     // the hunter charge decision, never by a timer that has nothing to predict.
     const eligible = forcedType ? [forcedType] :
       ANOMALY_KEYS.filter((k) => k !== 'redshift' &&
         this.dread >= ANOMALIES[k].gate && ANOMALIES[k].weight > 0 &&
-        (k !== 'swarm' || guideTarget));
+        (k !== 'swarm' || guideTarget) &&
+        (k !== 'crowd' || crowdTarget));
     if (!eligible.length) return false;
     let total = 0;
     for (const k of eligible) total += ANOMALIES[k].weight;
@@ -1686,22 +1760,11 @@ export class Director {
         this.audio.muffleFor(500, a.dur * 0.7);
         break;
       case 'crowd': {
-        // A dozen of them, standing perfectly still, facing you. Spread across
-        // the whole forward arc rather than the narrow cone _placeInSight uses,
-        // and kept close enough that the fog does not simply eat them.
-        a.figures = [];
-        const p = this.player;
-        const n = 9 + ((this.rng() * 6) | 0);
-        for (let i = 0; i < n; i++) {
-          for (let tries = 0; tries < 12; tries++) {
-            const ang = p.angle + this._rand(-1.15, 1.15);
-            const dist = this._rand(2.6, 9.5);
-            const x = p.x + Math.cos(ang) * dist;
-            const y = p.y + Math.sin(ang) * dist;
-            if (!this._openAt(x, y) || !this._hasLineOfSight(x, y)) continue;
-            a.figures.push({ x, y, yaw: Math.atan2(p.y - y, p.x - x) });
-            break;
-          }
+        // They are ranks, not scatter. Their empty centre follows a real route
+        // toward the gun or an unused landmark, and every body faces down it.
+        if (!this._buildCrowdRoute(a, crowdTarget)) {
+          this.anomaly = null;
+          return false;
         }
         this.audio.playDrone({ freq: 36, dur: a.dur, volume: 0.24 });
         this.audio.playDistantCall(0.26, 0);
@@ -1839,6 +1902,22 @@ export class Director {
         fx.panelEmissive = env * 64;
         fx.fogDensity *= 1 - env * 0.45;
         fx.stress = Math.max(fx.stress, env * 0.5);
+
+        // The aisle is guidance. The missing place beside it is a choice: enter
+        // it, stop moving, and face the same way as the rank for long enough.
+        // Requiring all three prevents a player following the route from earning
+        // an ending they did not choose.
+        if (a.join?.terminal) {
+          const p = this.player;
+          const inPlace = Math.hypot(p.x - a.join.x, p.y - a.join.y) < 0.48;
+          const aligned = Math.abs(wrapAngle(p.angle - a.join.yaw)) < 0.52;
+          if (inPlace && aligned && !p.moving) a.joinT = (a.joinT || 0) + dt;
+          else a.joinT = Math.max(0, (a.joinT || 0) - dt * 2);
+          if (a.joinT >= ANOMALIES.crowd.joinFor) {
+            this._endCongregation();
+            return;
+          }
+        }
         break;
       }
     }
@@ -1860,6 +1939,16 @@ export class Director {
         }
       }
     }
+    if (!a.leaving && a.type === 'crowd') {
+      const p = this.player;
+      for (const f of a.figures) {
+        if ((f.x - p.x) ** 2 + (f.y - p.y) ** 2 <
+            KEEP_AWAY.crowd * KEEP_AWAY.crowd) {
+          a.t = a.dur;
+          break;
+        }
+      }
+    }
 
     if (a.t >= a.dur && !a.leaving) {
       // The two that put THINGS in the corridor do not get to fade out. Every
@@ -1874,6 +1963,22 @@ export class Director {
       if (a.type === 'blackout') this.audio.flickerWhine(0.8);
       this.anomaly = null;
     }
+  }
+
+  _endCongregation() {
+    if (this.ending) return;
+    this.ending = 'congregation';
+    this.fatal = true;
+    this.creature = null;
+    this.hunter = null;
+    this.hunterArrivesAt = 0;
+    this.hunterArrivalSpot = null;
+    this.audio.setBreath(0);
+    this.audio.setHeartbeat(0);
+    this.audio.playDistantCall(0.48, 0);
+    this.audio.duck(0, 0.8);
+    if (this.onDeath) this.onDeath(this.ending);
+    this.onDeath = null;
   }
 
   // ==========================================================================

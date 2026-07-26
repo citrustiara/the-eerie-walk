@@ -13,7 +13,7 @@ at six stages of coming apart. Everything that makes one place different from
 another is its *shape*: how tight it is, how far you can see, whether the ceiling
 is at two and a half metres or seven or simply absent with windows glowing three
 storeys up, and whether the floor is all there. It is often not, and walking into
-a hole is one of the two ways this ends.
+a hole is one way this ends.
 
 Before you fire the gun there are no jumpscares and nothing runs at you. The
 creature walks, and walking is enough; it reaches you and then it simply is not
@@ -650,7 +650,10 @@ you and it.
     charges, or before a landmark ritual fires; it is never selected randomly
   - *blackout* — the torch simply stops, and the creature reliably arrives
     while it is off
-  - *crowd* — the ceiling lights come up, the corridor is full, then dark again
+  - *crowd* — the ceiling lights reveal ranks lining a real walkable route
+    toward the unfound gun or an unused landmark. The centre aisle is safe.
+    One person-sized place in a ritual-bound rank is empty; deliberately
+    standing there and facing with them produces **the congregation** ending
 
 Everything is gated behind a rising `dread` value, so the first minute is calm
 and the place only turns on you later.

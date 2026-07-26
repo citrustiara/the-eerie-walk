@@ -459,7 +459,7 @@ export const HORROR = {
 export const KEEP_AWAY = {
   eyes: 8.0,        // the single pair down the corridor
   swarm: 1.0,       // how much closer you may get to a swarm pair before it leaves
-  crowd: 6.5,       // the bodies under the lit panels
+  crowd: 0.24,      // touching a body breaks the formation; the centre aisle is safe
   ritual: 7.0,      // whatever the landmark events put in the room
 };
 
@@ -476,7 +476,7 @@ export const ANOMALIES = {
   // becomes a warning the player can learn instead of an unrelated filter.
   redshift:  { gate: 0.30, weight: 0, dur: [4.4, 5.2], lead: 2.4, chargeLead: 1.8 },
   blackout:  { gate: 0.38, weight: 2, dur: [3.4, 5.0] },  // the torch dies completely
-  crowd:     { gate: 0.46, weight: 1, dur: [3.0, 4.5] },  // you are not alone at all
+  crowd:     { gate: 0.46, weight: 1, dur: [8.0, 11.0], joinFor: 1.25 },
 };
 
 // How it ends.
@@ -512,6 +512,14 @@ export const ENDINGS = [
     eyebrow: 'the hammer fell on nothing',
     title: 'it had you',
     note: 'twelve was all there ever was. it kept coming after the twelfth, the way it was always going to.',
+  },
+  {
+    id: 'congregation',
+    numeral: 'iv',
+    name: 'the congregation',
+    eyebrow: 'there was room beside them',
+    title: 'you took your place',
+    note: 'when the lights returned, one more figure was facing the plinth.',
   },
 ];
 

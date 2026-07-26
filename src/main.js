@@ -57,8 +57,9 @@ let gunEquipped = false;
 //   dead     one ending, on its own
 //   endings  the list of them
 //
-// The dying state exists because both deaths take a second or two to play out
-// and neither of them is allowed to be cancelled by pressing escape.
+// The dying state exists because the fall and the hunter take a second or two
+// to play out and neither is allowed to be cancelled by pressing escape. The
+// congregation has already made its choice when its ending arrives.
 let mode = 'start';
 const isOver = () => mode === 'dying' || mode === 'dead' || mode === 'endings';
 
@@ -209,8 +210,8 @@ director.onDeath = (id) => showDeath(id);
 director.onLine = showLine;
 
 // --- Going in a hole --------------------------------------------------------
-// One of the two ways this ends. The creature catches you and lets go; the
-// floor does not, and neither does the thing that answers the gun.
+// One way this ends. The creature catches you and lets go; the floor does not,
+// and neither does the thing that answers the gun.
 player.onFall = () => {
   hideGunHint();
   subtitle.classList.remove('visible');
