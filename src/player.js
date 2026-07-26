@@ -107,9 +107,7 @@ export class Player {
 
   _startFall() {
     this.falling = true;
-    // Not from rest. Starting at zero meant the first tenth of a second of a
-    // fall looked exactly like standing still, and the floor giving way has to
-    // register on the frame it happens on, not two frames later.
+    // Gravity owns the vertical motion from the instant the floor runs out.
     this.fallVel = PIT.entryVel;
     this.sprinting = false;
     // You keep some of the speed you walked in with, so you go over the edge at
@@ -124,8 +122,10 @@ export class Player {
     const { dx } = input.consumeMouse();
     if (dx) this._rotate(dx * PLAYER.mouseSensitivity);
 
+    // Exact constant-acceleration integration keeps the fall time independent
+    // of frame rate instead of applying a whole frame of new velocity early.
+    this.eyeZ -= this.fallVel * dt + 0.5 * PIT.gravity * dt * dt;
     this.fallVel += PIT.gravity * dt;
-    this.eyeZ -= this.fallVel * dt;
 
     // Whatever you were doing when the floor ran out, you carry on doing, until
     // the side of the shaft takes it off you.
@@ -135,10 +135,9 @@ export class Player {
     if (!this.world.isWall(Math.floor(this.x), Math.floor(ny))) this.y = ny;
     else this.fallDY = 0;
 
-    // The view tips forward over the edge and keeps going. Fast enough to be
-    // all the way down inside the first third of a drop that is now only six
-    // tenths of a second long.
-    this.pitch = Math.max(-PLAYER.maxPitch, this.pitch - PLAYER.maxPitch * 5.5 * dt);
+    // The view tips over the edge during the fall instead of snapping down in
+    // its first few frames.
+    this.pitch = Math.max(-PLAYER.maxPitch, this.pitch - PLAYER.maxPitch * 1.1 * dt);
     this.bobOffset *= 0.72;
     this.bobRoll *= 0.72;
 

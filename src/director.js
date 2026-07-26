@@ -19,7 +19,7 @@
 
 import {
   HORROR, LIGHT, FOG, GUN, CREATURE, HUNTER, ANOMALIES, RENDER, JUMPSCARE, NOISE,
-  STUTTER, LANDMARK_EVENTS, PIT, KEEP_AWAY,
+  STUTTER, LANDMARK_EVENTS, PIT, KEEP_AWAY, GRACE, DOOR, OUTSIDE, PLAYER, AUDIO,
 } from './config.js';
 import { wrapAngle, clamp, lerp } from './mathutils.js';
 import { GUN_ANCHOR } from './world.js';
@@ -97,6 +97,26 @@ export class Director {
     this.ending = null;        // which ending id the session finished on
     this.onDeath = null;       // fired once, after the face has finished with you
 
+    // --- the way out --------------------------------------------------------
+    //
+    // Grace is dread run backwards, and it is the only number in here that the
+    // player is never shown. It rises from staying with the things the building
+    // shows you instead of leaving or walking into them, and the first round
+    // fired destroys it for good. See config.js GRACE.
+    this.grace = 0;
+    this.graceLost = false;
+    this.stareT = 0;           // continuous seconds of a held stare
+    this.stareEarned = 0;      // ...and what staring has been worth so far
+    this.doorSite = null;      // { x, y, yaw, ... } — placed like the pistol
+    this.nextDoorTryAt = Infinity;
+    this.doorPlacements = 0;
+    this.through = false;      // walked into it; the stutter is covering the move
+    this.outside = null;       // { t, x, y, bleach } once you are out there
+    this.locked = false;       // main.js freezes the player while this is up
+    this.onDoor = null;        // you found it
+    this.onOutside = null;     // ...and you are through it
+    this.onFinale = null;      // ...and the sky has started to go
+
     // --- gun state ---------------------------------------------------------
     this.ammo = GUN.magazine;
     this.nextShotAt = 0;
@@ -141,9 +161,47 @@ export class Director {
       this.next[key] = time + this._rand(4.5, 10.5);
       return;
     }
-    // As dread rises, the window compresses — events come faster.
+    // As dread rises, the window compresses — events come faster. Grace pulls
+    // the other way on the three events that are only ever the building talking
+    // at you, so a run that has been earning it audibly empties out. That is the
+    // whole tell: there is no meter, the place just stops doing things.
     const squeeze = 1 - this.dread * 0.5;
-    this.next[key] = time + this._rand(cfg.min, cfg.max) * squeeze + cfg.cooldown * 0.2;
+    const calm = (key === 'whisper' || key === 'distant' || key === 'redEyes')
+      ? 1 + this.grace * 1.6 : 1;
+    this.next[key] = time + this._rand(cfg.min, cfg.max) * squeeze * calm + cfg.cooldown * 0.2;
+  }
+
+  // ==========================================================================
+  // Grace
+  // ==========================================================================
+
+  _addGrace(n) {
+    if (this.graceLost || this.grace >= 1) return;
+    this.grace = Math.min(1, this.grace + n);
+    // At full, the building starts looking for somewhere to put the door. It
+    // does not announce this. The first you know is a draught.
+    if (this.grace >= 1 && !this.doorSite && this.nextDoorTryAt === Infinity) {
+      this.nextDoorTryAt = this.elapsed + this._rand(2.5, 6.0);
+    }
+  }
+
+  // One round. Not a penalty and not a reduction — the way out is gone for this
+  // run, and the twelve in the magazine are what you have instead. Everything
+  // about the second half of a session already followed from firing; this is
+  // the thing that makes NOT firing a decision rather than an omission.
+  _loseGrace() {
+    if (this.graceLost) return;
+    this.graceLost = true;
+    this.grace = 0;
+    this.stareT = 0;
+    this.nextDoorTryAt = Infinity;
+    if (this.doorSite) {
+      // It does not slam and it does not fade. The torch fails, the way every
+      // other thing in this building leaves, and then there is wall there.
+      const site = this.doorSite;
+      if (this.stutter) this.doorSite = null;
+      else this._startStutter(() => { if (this.doorSite === site) this.doorSite = null; });
+    }
   }
 
   // --- geometry helpers -----------------------------------------------------
@@ -343,6 +401,13 @@ export class Director {
         this.hasGun = false;
         this.ammo = GUN.magazine;
         return this._trySpawnGun(true);
+      // Skip the five witnessed rituals. Everything after the placement is the
+      // real thing, which is the part worth being able to look at repeatedly.
+      case 'door':
+        if (this.graceLost || this.through || this.outside) return false;
+        this.grace = 1;
+        this.doorSite = null;
+        return this._tryPlaceDoor();
     }
     return false;
   }
@@ -382,7 +447,26 @@ export class Director {
       scare: 0,
       stress: 0,
       darkFlash: 0,
+      whiteFlash: 0,
+      outside: false,
+      viewDistance: 0,
     };
+
+    // Out of the building. Nothing in here is chasing you any more and none of
+    // the machinery below has anything to say about a field, so the whole
+    // director gets out of the way and one sequence owns the frame.
+    if (this.outside) {
+      this._updateOutside(dt, fx);
+      this._updateStutter(dt, fx);
+      this.audio.update(0, dt);
+      return fx;
+    }
+    // Between walking into the door and coming out the other side of it: the
+    // torch is failing and there is nothing to update but that.
+    if (this.through) {
+      this._updateStutter(dt, fx);
+      return fx;
+    }
 
     this._updateRefusalHold(dt, fx);
     if (this.refusalDeathT > 0) {
@@ -457,6 +541,7 @@ export class Director {
     this._updateLandmarkWatch(dt, fx);
     this._updateRitual(dt, fx);
     this._updateGun(fx, time, dt);
+    this._updateDoor(fx, dt);
     this._updateDraft(dt);
     this._updateShake(dt, fx);
     // Last, so a blackout wins over whatever else was doing things to the light.
@@ -464,6 +549,17 @@ export class Director {
 
     // Dread very subtly thickens the fog over a whole session.
     fx.fogDensity *= 1 + this.dread * 0.12;
+    // ...and grace thins it, very slightly, and takes the frame a shade colder.
+    // Redshift already taught the player that a colour means something is about
+    // to happen. This is the same sentence with the sign flipped, and it is the
+    // only warning the ending ever gives.
+    if (this.grace > 0) {
+      fx.fogDensity *= 1 - this.grace * GRACE.calmFog;
+      if (!fx.grade) {
+        const g = this.grace * GRACE.calmTint;
+        fx.grade = [1 - g, 1 - g * 0.3, 1 + g * 0.9];
+      }
+    }
     this.audio.update(this.dread, dt);
     return fx;
   }
@@ -743,9 +839,15 @@ export class Director {
     }
     near = Math.sqrt(near);
     const keep = r.kind === 'altar' ? 3.4 : KEEP_AWAY.ritual;
-    if (!r.leaving && (r.t >= r.life || (r.t > 0.9 && near < keep))) {
+    const done = r.t >= r.life;
+    if (!r.leaving && (done || (r.t > 0.9 && near < keep))) {
       r.leaving = true;
       this.audio.setHeartbeat(0);
+      // THE DIFFERENCE BETWEEN THE TWO WAYS THIS ENDS. One of them is the room
+      // finishing with you; the other is you walking into it and breaking it up.
+      // Only the first is worth anything, and this one line is the spine of the
+      // sixth ending — everything else about it is delivery.
+      if (done) this._addGrace(GRACE.perRitual);
       this._startStutter(() => { this.ritual = null; });
     }
   }
@@ -1047,6 +1149,7 @@ export class Director {
     if (!c) {
       this.audio.setBreath(0);
       this.audio.setHeartbeat(clamp((this.dread - 0.5) * 0.4, 0, 0.25));
+      this.stareT = 0;
       return;
     }
 
@@ -1058,6 +1161,26 @@ export class Director {
     let dist = Math.hypot(dx, dy);
     const bearing = Math.atan2(dy, dx);
     const watched = this._isFacingPoint(c.x, c.y, 0.55);
+
+    // HOLDING YOUR GROUND. Watching it is already the central cost of the game:
+    // it slows to a crawl while you look, and looking is ground you are not
+    // making. Until now that was all it was. Standing still, close, with it in
+    // your cone, for three unbroken seconds is the other way to earn the door —
+    // and it is worth capping, because the whole point of this is that it is a
+    // nerve you hold, not a resource you farm.
+    if (!c.leaving && watched && !p.moving && dist <= GRACE.stareRange &&
+        !this.graceLost && this.stareEarned < GRACE.stareCap) {
+      this.stareT += dt;
+      if (this.stareT >= GRACE.stareFor) {
+        this.stareT = 0;
+        this.stareEarned += GRACE.perStare;
+        this._addGrace(GRACE.perStare);
+      }
+    } else if (this.stareT > 0) {
+      // Break it and you start again. A stare you can take breaks from is not
+      // a stare, it is a total.
+      this.stareT = Math.max(0, this.stareT - dt * 2.5);
+    }
 
     // It is never in the room with you. Whether it closed the distance or you
     // walked up to it, inside this radius it is simply gone. It stops doing
@@ -2007,6 +2130,7 @@ export class Director {
   // to read and releasing at any point cancels the choice.
   canRefuse() {
     return this.hasGun && this.ammo > 0 && !this.fatal &&
+      !this.outside && !this.through &&
       this.scareT <= 0 && this.refusalDeathT <= 0 &&
       !this.player.falling && !this.player.dead &&
       this.player.pitch <= -GUN.refusalPitch;
@@ -2077,6 +2201,7 @@ export class Director {
   // Fire one round. Returns true if a shot actually went off.
   shoot() {
     if (!this.hasGun || this.scareT > 0) return false;
+    if (this.outside || this.through) return false;
     if (this.now < this.nextShotAt) return false;
     this.nextShotAt = this.now + GUN.fireInterval;
 
@@ -2088,6 +2213,8 @@ export class Director {
     this.ammo--;
     if (this.onAmmoChange) this.onAmmoChange(this.ammo);
     this._armHunt();
+    // The round that arms the hunt is the round that closes the other way out.
+    this._loseGrace();
     this.audio.playGunshot();
     this.audio.playShellDrop(0.3);
     this.flashT = 0.075;
@@ -2556,6 +2683,294 @@ export class Director {
         this.audio.playDistantCall(0.28, pan);
         break;
     }
+  }
+
+  // ==========================================================================
+  // The door
+  // ==========================================================================
+  //
+  // Deliberately the same shape as _updateGun / _trySpawnGun above, down to the
+  // out-of-view placement and the escalating cues, because the two objects the
+  // building will hand you should arrive the same way. You already know how to
+  // look for this. The only differences are that it needs a wall to be in, and
+  // that its cue is air rather than metal.
+
+  _updateDoor(fx, dt) {
+    // A door within arm's reach of a hole is a genuine race: the fall and the
+    // way out would both fire on the same frame and the player would get
+    // whichever ending the call order happened to pick.
+    if (this.graceLost || this.through || this.fatal) return;
+    if (this.player.falling || this.player.dead) return;
+    if (!this.doorSite && this.elapsed >= this.nextDoorTryAt) this._tryPlaceDoor();
+    const site = this.doorSite;
+    if (!site) return;
+
+    const p = this.player;
+    const dist = Math.hypot(site.x - p.x, site.y - p.y);
+    const age = this.elapsed - site.spawnedAt;
+    site.closestDist = Math.min(site.closestDist, dist);
+    if (!site.committed && site.initialDist - site.closestDist >= GUN.progressLock) {
+      site.committed = true;
+    }
+
+    // The draught. Same escalating cadence as the pistol's clink and the same
+    // reason for it: you cannot watch it turn up, so hearing it is the whole
+    // invitation, and once is easy to miss.
+    if (this.elapsed >= site.nextCue && dist < 22) {
+      site.cues++;
+      site.nextCue = this.elapsed + Math.min(16, DOOR.cueEvery * (1 + site.cues * DOOR.cueGrowth));
+      const rel = wrapAngle(Math.atan2(site.y - p.y, site.x - p.x) - p.angle);
+      this.audio.playDraught(clamp(Math.sin(rel), -1, 1),
+        clamp(0.30 / (1 + dist * 0.06), 0.07, 0.30));
+    }
+
+    // Air moves toward a gap, and once the draught has been ignored for a while
+    // it starts moving where you are standing as well. This is the door's
+    // version of the pistol's footsteps: guidance you can follow that is still
+    // a thing happening in the world rather than a marker over it.
+    if (age >= DOOR.trailAfter && this.elapsed >= (site.nextPull || 0)) {
+      site.nextPull = this.elapsed + this._rand(4.5, 8.0);
+      const rel = wrapAngle(Math.atan2(site.y - p.y, site.x - p.x) - p.angle);
+      this.audio.playWhisper({ pan: clamp(Math.sin(rel), -1, 1), volume: 0.05 });
+    }
+
+    if (dist <= DOOR.proximity) { this._enterDoor(); return; }
+
+    // Unlike the pistol, a site you have never got near is not abandoned for a
+    // timer alone — it is abandoned because you are somewhere else now and it
+    // should be somewhere you will actually walk.
+    if (!site.committed && age > DOOR.visibleFor && dist > 26) {
+      this.doorSite = null;
+      this.nextDoorTryAt = this.elapsed + DOOR.respawnAfter;
+      return;
+    }
+
+    // The light under it, which is the only thing in nine minutes of building
+    // that has been on the other side of anything.
+    const lit = clamp((age - DOOR.glowAfter) / 6, 0, 1);
+    fx.meshes.push({
+      x: site.x, y: site.y, yaw: site.yaw,
+      key: 'doorway', scale: DOOR.scale, seed: site.seed,
+      // It breathes, very slightly and very slowly. Not a pulse — the number of
+      // things in here that blink on a timer is exactly zero, and this is the
+      // last place to start.
+      emitScale: (0.30 + lit * 0.70) * (0.90 + Math.sin(this.elapsed * 0.9) * 0.10),
+      emitFar: 0.045,
+    });
+  }
+
+  _tryPlaceDoor() {
+    const p = this.player;
+    // Patience, as with the pistol: out of your view cone at first, so finding
+    // it is something you did, and then wherever it can be after that.
+    const patient = this.doorPlacements < 2;
+    const behind = (cx, cy) => !patient ||
+      Math.abs(wrapAngle(Math.atan2(cy + 0.5 - p.y, cx + 0.5 - p.x) - p.angle)) >= DOOR.spawnBehind;
+    let best = null;
+
+    // A landmark that has marked a spot wins, exactly as it does for the gun. A
+    // door in the ward is a door you can find your way back to; a door in the
+    // ninth identical corridor of a warren is a door you saw once.
+    const anchor = this.world.nearestAnchor(p.x, p.y, DOOR.anchorRadius, GUN_ANCHOR);
+    if (anchor && this._canPlaceDoor(anchor.cx, anchor.cy) && behind(anchor.cx, anchor.cy)) {
+      best = anchor;
+    }
+
+    const offsets = patient
+      ? [Math.PI, -Math.PI * 0.8, Math.PI * 0.8, -Math.PI * 0.55, Math.PI * 0.55]
+      : [0, -0.4, 0.4, Math.PI, -Math.PI * 0.7, Math.PI * 0.7];
+    for (const off of offsets) {
+      for (let i = 0; i < 10 && !best; i++) {
+        const ang = p.angle + off + this._rand(-0.25, 0.25);
+        const d = this._rand(DOOR.spawnMin, DOOR.spawnMax);
+        const cx = Math.floor(p.x + Math.cos(ang) * d);
+        const cy = Math.floor(p.y + Math.sin(ang) * d);
+        if (this._canPlaceDoor(cx, cy) && behind(cx, cy)) best = { cx, cy };
+      }
+    }
+
+    // Ring search. Every cell of the building has a wall within a few metres of
+    // it, so this effectively cannot fail — but it can fail to find one BEHIND
+    // you, and a door you watched arrive is worth less than one you found.
+    if (!best) {
+      const px = Math.floor(p.x), py = Math.floor(p.y);
+      let fallback = null;
+      for (let r = 3; r <= 14 && !best; r++) {
+        for (let y = -r; y <= r && !best; y++) {
+          for (let x = -r; x <= r; x++) {
+            if (Math.abs(x) !== r && Math.abs(y) !== r) continue;
+            const cx = px + x, cy = py + y;
+            if (!this._canPlaceDoor(cx, cy)) continue;
+            if (behind(cx, cy)) { best = { cx, cy }; break; }
+            if (!fallback) fallback = { cx, cy };
+          }
+        }
+      }
+      best = best || fallback;
+    }
+
+    if (!best) { this.nextDoorTryAt = this.elapsed + 2; return false; }
+
+    // Which wall face it is set into, and the yaw that puts its back against it.
+    // The mesh is authored opening toward local -y, so the wall bearing has to
+    // be turned a quarter turn to become the instance yaw.
+    const wall = this._doorFacing(best.cx, best.cy);
+    const x = best.cx + 0.5 + Math.cos(wall) * 0.42;
+    const y = best.cy + 0.5 + Math.sin(wall) * 0.42;
+    const initialDist = Math.hypot(x - p.x, y - p.y);
+    this.doorPlacements++;
+    this.doorSite = {
+      x, y, yaw: wall - Math.PI / 2,
+      seed: (this.rng() * 0xffffffff) >>> 0,
+      spawnedAt: this.elapsed,
+      nextCue: this.elapsed + 0.6,
+      nextPull: 0,
+      cues: 0,
+      initialDist,
+      closestDist: initialDist,
+      committed: false,
+    };
+    const rel = wrapAngle(Math.atan2(y - p.y, x - p.x) - p.angle);
+    const pan = clamp(Math.sin(rel), -1, 1);
+    // The building goes quiet around it for a moment. Everything else that has
+    // ever arrived did so over the top of the room tone; this makes a hole in
+    // it, which is the only way a *door* could possibly announce itself.
+    this.audio.playDraught(pan, 0.30);
+    this.audio.quietBeat({ target: 0.14, attack: 0.5, hold: 1.6, release: 2.2 });
+    if (this.onDoor) this.onDoor(this.doorSite);
+    return true;
+  }
+
+  // It has to be in something. A door frame standing free in a corridor is a
+  // prop; a door in a wall is a door, and the difference is one neighbour test.
+  _doorFacing(cx, cy) {
+    for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      if (!this.world.isWall(cx + dx, cy + dy)) continue;
+      if (this.world.blocked(cx - dx, cy - dy)) continue;   // room to stand back
+      return Math.atan2(dy, dx);
+    }
+    return 0;
+  }
+
+  _canPlaceDoor(cx, cy) {
+    if (this.world.blocked(cx, cy)) return false;
+    if (Math.hypot(cx + 0.5 - this.player.x, cy + 0.5 - this.player.y) < 2.4) return false;
+    for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      if (this.world.isWall(cx + dx, cy + dy) && !this.world.blocked(cx - dx, cy - dy)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  // ==========================================================================
+  // Through it
+  // ==========================================================================
+  //
+  // There is no portal here and there does not need to be one. Everything in
+  // this game that changes does it inside a torch failure — the creature goes,
+  // the ritual goes, the crowd goes — so the way out uses the same three to
+  // seven cuts to black, and somewhere in the middle of them the building stops
+  // being where you are.
+  _enterDoor() {
+    if (this.through || this.ending) return;
+    this.through = true;
+    this.locked = true;
+    this.doorSite = null;
+    this.creature = null;
+    this.hunter = null;
+    this.hunterArrivesAt = 0;
+    this.ritual = null;
+    this.pendingRitual = null;
+    this.anomaly = null;
+    this.audio.playDoorOpen();
+    this.audio.setBreath(0);
+    this.audio.setHeartbeat(0);
+    this.audio.duck(AUDIO.masterVolume * 0.7, 0.6);
+    this._startStutter(() => this._arriveOutside());
+  }
+
+  _arriveOutside() {
+    const o = this.world.stampOutside();
+    const p = this.player;
+    p.x = o.spawnX; p.y = o.spawnY;
+    p.dirX = Math.cos(o.angle); p.dirY = Math.sin(o.angle);
+    p.planeX = -p.dirY * RENDER.fov; p.planeY = p.dirX * RENDER.fov;
+    p.pitch = 0;
+    p.eyeZ = PLAYER.eyeHeight;
+    p.velX = 0; p.velY = 0;
+    p.bobOffset = 0; p.bobRoll = 0;
+    p.sprinting = false;
+    p.flashlight = true;      // it is still on. It just stops mattering.
+    this.outside = { t: 0, x: p.x, y: p.y, bleach: null };
+    this.locked = false;
+    this.audio.startWind();
+    this.audio.setWind(0.26, 0.9);
+    this.audio.duck(AUDIO.masterVolume, 1.4);
+    if (this.onOutside) this.onOutside();
+  }
+
+  _updateOutside(dt, fx) {
+    const o = this.outside, p = this.player;
+    o.t += dt;
+    // The air settling. It does not snap clear on the first frame — you get a
+    // couple of seconds of it opening up, which is what makes the distance
+    // register as distance rather than as a different picture.
+    const open = clamp(o.t / OUTSIDE.openFor, 0, 1) ** 0.7;
+    const dawn = clamp(o.t / OUTSIDE.dawnFor, 0, 1);
+
+    fx.outside = true;
+    fx.viewDistance = OUTSIDE.viewDistance;
+    fx.fogDensity = lerp(FOG.density, OUTSIDE.fogDensity, open);
+    fx.fogColor = [
+      lerp(FOG.color[0], OUTSIDE.horizon[0], open),
+      lerp(FOG.color[1], OUTSIDE.horizon[1], open),
+      lerp(FOG.color[2], OUTSIDE.horizon[2], open),
+    ];
+    fx.ambient = lerp(LIGHT.ambient, OUTSIDE.ambient, open);
+    // The torch does not fail and it is not taken off you. It stops being worth
+    // anything, which has never happened before, and then it is off.
+    fx.beamIntensity = LIGHT.beamIntensity *
+      (1 - clamp(o.t / OUTSIDE.torchOutFor, 0, 1)) ** 1.5;
+    fx.skyLift = 0.86 + 0.14 * dawn;
+    fx.panelEmissive = 0;
+    fx.grade = null;
+    fx.stress = 0;
+    this.audio.setWind(0.26 + dawn * 0.10, 2.0);
+
+    // It ends when you have put some ground between yourself and the door, or
+    // when you have stood there long enough. Standing still is a legitimate way
+    // to spend this — there is a building behind you with wallpaper on it.
+    const walked = Math.hypot(p.x - o.x, p.y - o.y);
+    if (o.bleach == null && o.t >= OUTSIDE.minHold &&
+        (walked >= OUTSIDE.walkFor || o.t >= OUTSIDE.holdFor)) {
+      o.bleach = 0;
+      this.audio.duck(AUDIO.masterVolume * 0.5, OUTSIDE.bleachFor * 0.8);
+      // From here it is over, the same way the drop and the face are over
+      // before their screens arrive. You keep walking; you just cannot stop it.
+      if (this.onFinale) this.onFinale();
+    }
+    if (o.bleach != null) {
+      o.bleach += dt / OUTSIDE.bleachFor;
+      // Slow at first and then all at once, like an exposure running away.
+      fx.whiteFlash = clamp(o.bleach, 0, 1) ** 2.2;
+      fx.skyLift = Math.min(1.35, fx.skyLift + o.bleach * 0.35);
+      if (o.bleach >= 1) this._endOutside();
+    }
+  }
+
+  _endOutside() {
+    if (this.ending) return;
+    this.ending = 'outside';
+    // Not "dead" — nothing out here killed you. It is the same flag because it
+    // means the same thing to everything that reads it: the run is over and
+    // nothing the player does reaches the game any more.
+    this.fatal = true;
+    this.outside.bleach = 1;
+    this.audio.setWind(0.0001, 1.0);
+    this.audio.duck(0, 1.1);
+    if (this.onDeath) this.onDeath(this.ending);
+    this.onDeath = null;
   }
 
   _canPlaceGun(cx, cy) {

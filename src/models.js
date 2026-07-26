@@ -555,6 +555,102 @@ function crowdCeilingLight() {
   ];
 }
 
+// The way out. The only object in the game besides the pistol that the building
+// puts down on purpose, and the pair of them are the whole choice: one of them
+// summons the thing that ends you and the other one does this.
+//
+// It is authored standing in the plane y=0 with its opening facing -y, and the
+// director places it flush against a wall face with the yaw that turns -y into
+// the wall — so it reads as a door IN something rather than a prop standing in
+// a corridor. There is no hole cut in the geometry behind it and there does not
+// need to be: what is through it is not somewhere the raycaster can see.
+//
+// Everything about it is ordinary. It is a fire door in a building full of
+// them, and the only thing wrong with it is that there is light on the other
+// side, which there has not been anywhere else in nine minutes of walking.
+function doorway() {
+  const W2 = 1.02, HH = 2.06, JAMB = 0.085, PROUD = 0.05;
+  const PAINT = [104, 96, 82];        // institutional grey-green, filthy
+  const DARK = [46, 42, 36];
+  // The pre-dawn coming through the gap. Cold, not warm — this is not a fire
+  // exit sign and it is not sunrise, it is four in the morning.
+  const GLOW = [150, 168, 196];
+  const f = [];
+
+  // Architrave: two jambs and a head, standing proud of the wall.
+  for (const s of [-1, 1]) {
+    f.push(...bx(s * (W2 / 2 + JAMB / 2), 0, HH / 2, JAMB, PROUD, HH + JAMB, PAINT, { mat: 'wood' }));
+  }
+  f.push(...bx(0, 0, HH + JAMB / 2, W2 + JAMB * 2, PROUD, JAMB, PAINT, { mat: 'wood' }));
+
+  // What is behind it. A dark plane set back into the opening, so that the
+  // light along the edges has something to be light against.
+  f.push(face([
+    [-W2 / 2, 0.10, 0.002], [W2 / 2, 0.10, 0.002],
+    [W2 / 2, 0.10, HH], [-W2 / 2, 0.10, HH],
+  ], [18, 20, 24], 'wood'));
+
+  // THE GAP. A tall sliver down the closing edge and a strip under the bottom
+  // rail: the two places light gets out of a shut room. Both go in before the
+  // panel so the panel can occlude whatever it is actually in front of.
+  const SLIVER = 0.075;
+  f.push(face([
+    [W2 / 2 - SLIVER, 0.048, 0.012], [W2 / 2, 0.048, 0.012],
+    [W2 / 2, 0.048, HH - 0.04], [W2 / 2 - SLIVER, 0.048, HH - 0.04],
+  ], GLOW, 'glass', { emit: GLOW }));
+  // Over the threshold plate rather than inside it. Sitting at z=0.006 put it
+  // within the plate's own 16 mm box, which occluded it completely.
+  f.push(face([
+    [-W2 / 2 + 0.03, -0.05, 0.012], [W2 / 2 - 0.03, -0.05, 0.012],
+    [W2 / 2 - 0.03, 0.048, 0.012], [-W2 / 2 + 0.03, 0.048, 0.012],
+  ], GLOW, 'glass', { emit: GLOW }));
+
+  // The door itself, ajar by about six degrees on the left hinge. Hung on the
+  // real hinge line rather than spun about its centre, because a door pivoting
+  // around the middle of itself is the tell that it is a prop — and only just
+  // ajar, because a door standing half open is a doorway, and a doorway does
+  // not have a line of light down the side of it.
+  const panel = [
+    ...bx(W2 / 2 - 0.02, 0, HH / 2, W2 - 0.05, 0.045, HH - 0.03, PAINT, { mat: 'wood' }),
+    // Kick plate and a push bar: the furniture that makes it a fire door. Both
+    // darker than the leaf, not lighter — pale bars on a dark panel came out
+    // reading as glazing, and the last thing this wants to be is a window.
+    ...bx(W2 / 2 - 0.02, -0.026, 0.20, W2 - 0.18, 0.006, 0.32, [72, 68, 60], { mat: 'metal' }),
+    ...bx(W2 / 2 - 0.02, -0.030, 1.03, W2 - 0.22, 0.034, 0.055, [80, 76, 68], { mat: 'metal' }),
+  ];
+  f.push(...translate(rotZ(panel, -0.11), -W2 / 2, 0, 0));
+
+  // WHAT ACTUALLY SELLS IT: light on the floor. A four-pixel sliver at the far
+  // end of a corridor is a sliver; a patch of pale on the carpet in a building
+  // where the only light in nine minutes has been the one in your hand is the
+  // thing you turn round for. Three flat steps rather than a gradient, because
+  // the mesh shader has no per-vertex emissive and three quads cost nothing.
+  // They are BANDS, not stacked quads: three coplanar rectangles one inside the
+  // other would z-fight, since a floor plane's depth barely changes with the
+  // millimetre of height that would separate them.
+  const spill = (near, far, w0, w1, k) => face([
+    [-w0, -near, 0.003], [w0, -near, 0.003],
+    [w1, -far, 0.003], [-w1, -far, 0.003],
+  ], [GLOW[0] * k, GLOW[1] * k, GLOW[2] * k], 'glass',
+     { emit: [GLOW[0] * k, GLOW[1] * k, GLOW[2] * k] });
+  // These are much hotter than they look like they should be. The torch is
+  // pointed at this floor while you are looking at the door, and a wash worth
+  // thirty levels on top of a lit carpet is invisible — the spill has to beat
+  // the thing that is competing with it, not be physically plausible next to it.
+  // Thrown a good deal further than a real door would manage, for the same
+  // reason it is brighter: at this resolution, from the far end of the corridor
+  // where you first see it, a metre of floor is four pixels.
+  f.push(spill(0.05, 0.55, W2 / 2 - 0.08, W2 / 2 + 0.06, 0.80));
+  f.push(spill(0.55, 1.40, W2 / 2 + 0.06, W2 / 2 + 0.22, 0.46));
+  f.push(spill(1.40, 2.60, W2 / 2 + 0.22, W2 / 2 + 0.40, 0.20));
+
+  // The threshold, worn to the metal. Something has been over this a lot.
+  f.push(...bx(0, -0.005, 0.005, W2 + 0.04, 0.07, 0.010, [88, 86, 80], { mat: 'metal' }));
+  // And the sill of the frame, so the bottom of the jambs are not floating.
+  f.push(...bx(0, 0.06, 0.004, W2 + JAMB * 2, 0.05, 0.008, DARK, { mat: 'wood' }));
+  return f;
+}
+
 // ---------------------------------------------------------------------------
 
 // key -> [builder, opts]. `props` lists the ones the world scatterer may use.
@@ -610,5 +706,6 @@ export function buildMeshes() {
   out.bloodPool = bloodPool(0.55);
   out.bloodSmall = bloodPool(0.26);
   out.crowdCeilingLight = toWorld(crowdCeilingLight());
+  out.doorway = toWorld(doorway());
   return out;
 }

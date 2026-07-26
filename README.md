@@ -22,10 +22,17 @@ there, and you have to decide whether it ever was.
 Then you fire the gun, and something else comes. That one does not vanish, does
 not lose interest, and when it reaches you the run is over.
 
-There is no winning — only which ending you got. They are collected: the count
-is visible from the first death, the shapes of the ones you have not had are
-not. The list lives in `ENDINGS` in `src/config.js` and persists in
-localStorage under `SAVE_KEY`.
+Fire it and you also close the only way out. There is one ending that is not a
+death — the building puts down a door, the way it once put down the weapon, and
+it will only do that for a run in which you have not used the weapon. What is
+through it is wet ground, a treeline and a sky going pale, and it does not tell
+you whether you got out of anything.
+
+Five of the six endings are the building being done with you; the sixth is you
+being let go. There is still no winning. They are collected: the count is visible
+from the first death, the shapes of the ones you have not had are not. The list
+lives in `ENDINGS` in `src/config.js` and persists in localStorage under
+`SAVE_KEY`.
 
 The whole point is the dark: ambient light is almost nothing, so the handheld
 flashlight beam plus thick exponential fog are the only way to see. Dread is
@@ -53,9 +60,10 @@ Then open <http://localhost:8000/> and click to enter.
 - **Shift** — sprint (does not exist until something makes it necessary)
 - **Esc** — release the pointer (pauses)
 
-Development hotkeys live behind `DEBUG.enabled` in `src/config.js`: **6** spawns
-the hunter, **7** spawns distant eyes, **8** spawns the creature, **9** spawns
-the gun pickup, **0** forces an anomaly. The same flag exposes `window.__game` — the live world,
+Development hotkeys live behind `DEBUG.enabled` in `src/config.js`: **5** grants
+full grace and puts down the door, **6** spawns the hunter, **7** spawns distant
+eyes, **8** spawns the creature, **9** spawns the gun pickup, **0** forces an
+anomaly. The same flag exposes `window.__game` — the live world,
 player, director and renderer, plus `__game.step(dt, t)` to advance and draw a
 single frame without owning the pointer lock, which is how the models and
 lighting were tuned.
@@ -558,6 +566,116 @@ the view almost as far as it goes and hold the mouse button: the weapon turns
 inward over 1.35 seconds. Looking away or releasing lowers it without firing.
 Following through spends the round, cuts the frame to black and records
 **the refusal** ending; it does not summon the hunter.
+
+### Grace, and the door
+
+The first round you fire also closes the only way out of the building, and until
+that happens there is a second number running alongside dread that the player is
+never shown.
+
+**Grace** goes up only from *witnessing*: staying with something the place shows
+you until it has finished, rather than leaving or walking into it.
+
+- A **landmark ritual that runs its own timer out** is worth 0.24. Every one of
+  them also ends early if you close on it — that has always been true, and it is
+  now the difference between the two endings you can be walking toward. Five
+  witnessed rituals is the spine of the run.
+- **Holding a stare** is worth 0.07, capped at 0.28 lifetime. Stand still, with
+  the creature inside ten units and inside your view cone, for three unbroken
+  seconds. Watching it has always been pure cost — it slows to a crawl while you
+  look and looking is ground you are not making — and this is the only thing
+  that ever paid you for it. Break the stare and the count restarts; it is a
+  nerve you hold, not a total you accumulate.
+- **One round destroys it**, permanently, along with any door already placed:
+  the torch fails the way it does for everything else that leaves, and when the
+  light comes back there is wall there.
+
+There is no meter. What you get instead is the building going *quiet* — whispers,
+distant calls and the single pair of eyes all stretch their timers by up to 160%,
+the fog thins a few percent and the frame goes a shade colder. Redshift already
+taught you that a colour means something is coming; this is that sentence with
+the sign flipped.
+
+At full grace the building puts down a **door**, using the same machinery that
+gave you the pistol: out of your view cone, close, escalating cues, and a
+landmark-marked spot within eighteen cells wins over a random corridor. The
+difference is that it needs a wall to be in — a free-standing door frame is a
+prop, a door in a wall is a door — and that its cue is air rather than metal. A
+draught, then a draught nearer, and there is a cold sliver of light down its
+closing edge and a fan of light lying on the carpet in front of it, which after
+nine minutes in which the only light has been the one in your hand is the thing
+you turn round for.
+
+Walking into it plays out inside the ordinary torch failure, and somewhere in the
+middle of those cuts the building stops being where you are.
+
+### Outside
+
+The one place in the game that is not generated. It is stamped 9,000 cells away
+from anything a walk can reach, so no chunk needs invalidating and no seam is
+ever in shot, and it is hand-built rather than noised: 200 by 150 cells of open
+ground with the building's back wall along one edge of it, four cells thick, with
+bays and one doorway. The doorway is two cells deep and then sealed — walk back
+into it and there is a wall two metres in.
+
+Four things had to change in the renderer, and they are all consequences of one
+fact: the fog is no longer holding the picture in.
+
+- **The view distance moves.** The lighting tables run to 26 units, which is far
+  past what 0.2 fog will ever show you, and the floor cast clamping its row
+  distance there is invisible. At 0.034 it would be a hard ring of repeated
+  ground twenty-six metres out, so `_setViewDistance` rescales both tables to 74
+  and the fog table is rebuilt per frame anyway.
+- **The sky is sampled directionally** — u is the compass bearing of the column,
+  v is `atan((horizon − y) / H)`, the same projection the walls use — rather than
+  by world position like a ceiling. That is what puts it at infinity. It is not
+  fogged, because the bottom of the sky texture *is* the fog colour, so everything
+  on the ground recedes into exactly the value the air above the treeline has.
+- **Almost none of the sky is ever on screen.** Looking level you see elevations
+  of nought to about twenty-six degrees, which is the bottom 30% of the texture.
+  The first version put the cloud deck a third of the way up and the stars above
+  it, and the result was a flat grey band unless you looked at the ceiling.
+  Everything is now inside that band and the rest is what you have to go and find.
+- **A wall's height comes off the wall cell**, not the space in front of it —
+  the only place in the game that rule is inverted. Inside, a room's walls are
+  the height of the room, and reading it off the wall would give you a corridor
+  with two different ceiling heights. Outside there is no room, there is a
+  frontage, and a frontage has a roofline: the bays are a storey lower than the
+  main run. The space is CEIL_HIGH rather than CEIL_OPEN for the same reason —
+  open blocks are the city districts, whose façades run up out of the frame, and
+  the one thing the outside wall has to do is stop, at seven metres, with sky
+  above it.
+
+The ground is the other half of it, and probably the more important half, because
+the floor is the surface you are looking at the whole time: wet earth, dead grass
+in clumps, and standing water in the hollows carried in the texture's **alpha**
+channel, which the floor pass mixes toward the colour of the sky overhead. Puddles
+are the only place below the horizon where the sky appears.
+
+Two things that only showed up on screen:
+
+- **The treeline is painted into the sky, and the sky is allowed three rows below
+  the horizon.** A flat field converges on the fog colour within a couple of
+  screen rows — your eye is a metre and a half up — so the last of it came out as
+  a clean pale band, which under a dark treeline reads as standing water. The
+  cause is that trees painted at infinity occlude nothing, where a real treeline
+  stands *on* the ground. Row zero of the sky texture is unbroken trunk at every
+  bearing, so those three rows paint exactly the base of it.
+- **Walls outside are shaded to 42%.** Everything out there is lit by the sky,
+  and a vertical face sees half the dome where the ground sees all of it. Without
+  it, the ambient that makes the field read at all turns the building into sunlit
+  sandstone, and the frontage has to be a dark mass with a pale sky behind it.
+
+You get about eleven seconds of walking (26 units from the door) or forty seconds
+of standing still, whichever comes first, and never less than six and a half —
+long enough for the fog to finish opening. Then the sky overexposes over 2.4
+seconds and the card comes up out of the white. It is the only white cut in a
+game where everything else ends in black, and the card is pale with dark type for
+the same reason.
+
+Measured on the frames above: **3.1 ms median outside against 7.3 ms inside**.
+It is cheaper out there — no props, no ceiling cast, and most rays never hit
+anything.
 
 ### How things leave
 

@@ -112,21 +112,17 @@ export const PIT = {
   eyesAt: 0.62,         // how far down the things that look up at you are
   // The fall itself.
   //
-  // This used to be real gravity (3.27 wall-heights/s², one wall height being
-  // three metres) and the drop took a second and a half. Physically correct and
-  // completely wrong: a second and a half is long enough to watch yourself
-  // falling, and watching yourself fall is not the same feeling as the floor
-  // going. It is now about three times real gravity with a hard shove on the
-  // first frame, the whole drop is over in a bit under six tenths of a second,
-  // and it is fully black a fifth of the way in. Floor, nothing, bottom.
-  gravity: 9.4,
-  entryVel: 1.7,        // you are not let go of, you are dropped
-  drift: 0.28,          // fraction of your walking speed you keep on the way down
-  // The frame goes black almost at once. The torch is pointed at a wall that is
-  // already moving past too fast to light, and then it is not pointed at
-  // anything.
+  // A wall height is three metres, so 9.81 m/s² is 3.27 wall-heights/s². From
+  // eye height to the bottom is 3.1 wall heights, making this a roughly
+  // 1.38-second fall. There is no artificial downward shove: you leave the edge
+  // from rest vertically and retain the horizontal momentum you walked in with.
+  gravity: 3.27,
+  entryVel: 0,
+  drift: 1.0,
+  // The shaft fades out as the torch and floor recede rather than cutting to
+  // black almost immediately.
   darkFrom: 0.34,       // eye height, on the way down, where the dark starts
-  darkTo: 0.02,         // ...and where there is nothing left to see by
+  darkTo: -0.70,        // ...and where there is nothing left to see by
   deadFor: 0.35,        // seconds at the bottom before the screen comes up
 };
 
@@ -482,15 +478,119 @@ export const ANOMALIES = {
   crowd:     { gate: 0.46, weight: 1, dur: [8.0, 11.0], joinFor: 1.25 },
 };
 
+// GRACE — the only thing in the game that is not the building winning.
+//
+// It rises from WITNESSING: staying with something the building shows you until
+// it is finished with you, rather than leaving or walking into it. Everything
+// else in here escalates; this is the one number that goes the other way, and
+// the player is never shown it.
+//
+// The gun destroys it. Not reduces — destroys, permanently, on the first round.
+// That is the whole point of having it: twelve rounds already summon something
+// worse, and now they also close the only door out, so the weapon becomes a
+// decision you make once and live inside rather than a resource you spend.
+export const GRACE = {
+  // Five witnessed rituals, or four and one held stare. At one landmark every
+  // minute or two of walking plus the 22 s cooldown between them, that is a
+  // five-to-eight minute run — long, deliberately. This is the ending you get
+  // for the walk you took seriously.
+  perRitual: 0.24,
+  // Watching the creature is currently pure cost: it slows to a crawl while you
+  // look at it, and looking at it is ground you do not make. This is the payoff.
+  // You have to be still, it has to be close, and it has to be in your cone.
+  stareRange: 10.0,
+  stareFor: 3.0,            // seconds of continuous held stare per award
+  perStare: 0.07,
+  stareCap: 0.28,           // ...and this is all staring will ever be worth
+  // The tell. There is no meter: the building simply gets quieter as this rises,
+  // and the frame goes a shade colder. Redshift means something is coming, and
+  // players who learn that will read this without being told.
+  calmFog: 0.10,            // fraction of the fog it thins at full grace
+  calmTint: 0.07,           // how far toward cold the grade goes
+};
+
+// THE DOOR — what the building offers you instead of a gun.
+//
+// Deliberately the same machinery as GUN above: placed out of your view cone,
+// close, announcing itself, with the cues escalating the longer it is ignored.
+// If you found the pistol you already know how to find this, and the fact that
+// the two arrive the same way is the point.
+export const DOOR = {
+  proximity: 0.85,          // how close you must get before you are through it
+  cueEvery: 6.5,            // seconds between draughts
+  cueGrowth: 0.22,
+  glowAfter: 5,             // seconds before the light under it is visible
+  trailAfter: 22,           // ...and before the air starts moving down the route
+  anchorRadius: 18,         // a landmark that has marked a spot wins, as ever
+  spawnMin: 4.0,
+  spawnMax: 8.0,
+  spawnBehind: 1.05,        // radians off your facing before a spot is eligible
+  respawnAfter: 3.0,        // seconds before an unreachable site is moved
+  visibleFor: 60,           // ...and how long it waits before giving up on one
+  scale: 1.0,
+};
+
+// OUTSIDE — where the door goes.
+//
+// Not a corridor with the lights on. Wet ground, a treeline, a sky going pale,
+// and a seven-metre building wall behind you with the wallpaper still on it.
+// It is one hand-built place, stamped far away from anywhere the walk can
+// reach, and you arrive in it inside the same torch-failure the game uses for
+// everything else that changes.
+export const OUTSIDE = {
+  // The region, in cells. It has to be bigger than the DDA can see (64 cells)
+  // in every direction from anywhere you can stand, or you would be looking at
+  // the seam where the building starts again.
+  width: 200,
+  height: 150,
+  origin: [9000, 9000],     // far enough out that no walk will ever generate it
+  wallDepth: 4,             // how thick the building's back wall is
+  doorWidth: 2,
+
+  // How far the eye goes once the fog stops holding it. The rest of the game
+  // runs at 26 units, which is well past what 0.2 fog will show you; out here
+  // the fog is a fifth of that and the clamp would be a visible ring on the
+  // ground, so the view distance moves with it.
+  viewDistance: 74,
+  fogDensity: 0.034,
+  // The fog colour IS the sky at the horizon. Everything that recedes has to
+  // resolve to the same value the bottom of the sky does or the ground and the
+  // air meet at a seam.
+  horizon: [104, 112, 132],
+  ambient: 0.92,            // you do not need the torch. That has never been true.
+
+  openFor: 2.6,             // seconds for the fog to settle after you arrive
+  torchOutFor: 3.2,         // ...and for the torch to become irrelevant and stop
+  dawnFor: 20,              // the sky keeps going pale for this long
+  // It ends when you have walked away from the door, or when you have stood
+  // there long enough. Standing still and turning round is a legitimate way to
+  // spend this — there is something behind you worth seeing.
+  //
+  // Thirteen units was the first number and it was far too few: a player who
+  // simply held W was through the whole ending in five and a half seconds, with
+  // the fog still opening and the sky not yet started. Twenty-six is about
+  // eleven seconds of walking, which is long enough to have gone somewhere.
+  walkFor: 26,              // units from the door
+  holdFor: 40,              // ...or seconds, whichever comes first
+  minHold: 6.5,             // and never before this, however fast you walk
+  bleachFor: 2.4,           // the sky overexposing, which is the only white cut
+                            // in a game where everything else ends in black
+};
+
 // How it ends.
 //
 // There is no winning. There is only the particular way the building was done
-// with you, and the point of writing them down is that after the first one you
-// know there are others — the count is visible from the first death, the shapes
-// of the ones you have not had are not.
+// with you — except once, and the sixth is not a win either: nothing is
+// following you any more, and that is all anyone can tell you.
+//
+// The point of writing them down is that after the first one you know there are
+// others — the count is visible from the first death, the shapes of the ones you
+// have not had are not.
 //
 // Order here is the order they are listed in. `id` is what goes in localStorage,
 // so do not rename one without deciding what happens to saves that have it.
+// Appending is safe: an old save keeps everything it had and the total it is
+// counted against goes up by one.
 export const ENDINGS = [
   {
     id: 'fall',
@@ -532,6 +632,14 @@ export const ENDINGS = [
     title: 'it was still there',
     note: 'the building continued around the place you had been.',
   },
+  {
+    id: 'outside',
+    numeral: 'vi',
+    name: 'the door',
+    eyebrow: 'there was air moving',
+    title: 'you got out',
+    note: 'wet ground, a treeline, a sky going pale. nothing on it, no road — and the wallpaper did not stop at the outside wall.',
+  },
 ];
 
 // Where the collected endings live between sessions.
@@ -541,6 +649,7 @@ export const SAVE_KEY = 'the-eerie-walk/endings';
 export const DEBUG = {
   enabled: true,
   keys: {
+    door: 'Digit5',
     hunter: 'Digit6',
     redEyes: 'Digit7',
     creature: 'Digit8',

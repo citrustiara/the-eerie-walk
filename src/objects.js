@@ -64,7 +64,9 @@ export class Props {
     // something left in it, which is what makes it read as a room.
     const anchored = this.world.isPropAnchor(cx, cy);
 
-    if (!nearSpawn && !this.world.blocked(cx, cy) &&
+    // Nothing was ever left behind out there, because nobody was ever in there
+    // to leave it. A cardboard box on the grass would undo the whole ending.
+    if (!nearSpawn && !this.world.blocked(cx, cy) && !this.world.isOutside(cx, cy) &&
         (anchored || seedRoll > 1 - PROPS.cellChance)) {
       const baseSeed = (seedRoll * 4294967296) >>> 0;
       const lead = pickType(hash2(cx * 61 + cy * 113, cy * 41 + cx * 89));

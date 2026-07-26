@@ -563,6 +563,204 @@ function deckTexture() {
 // the bottom. Both wrap in both axes because the renderer samples them from
 // arbitrary world coordinates.
 
+// ============================================================================
+// OUTSIDE — the two surfaces that only ever exist in ending vi.
+//
+// Everything else in this file is interior decay seen from under three metres.
+// These two are the opposite of that on purpose: the ground is organic and wet,
+// and the sky is the only thing in the game that is further away than the fog.
+// If either of them reads as "a corridor with the lights on", the ending has
+// failed, so neither of them shares a single colour with anything above.
+// ============================================================================
+
+// The sky is sampled DIRECTIONALLY — u is the compass bearing of the ray, v is
+// how far up the screen row is — rather than by world position like the ceiling.
+// That is what puts it at infinity: walk toward it and nothing about it changes,
+// which is both correct and the point.
+export const SKY_W = 512;         // one full turn
+export const SKY_H = 192;         // horizon (row 0) to straight up (row H-1)
+// The bearing the light is coming up from. Not a sun — there is no disc and it
+// never rises. Just the one quarter of the sky that is further along.
+const DAWN_BEARING = 0.62;
+
+function skyTexture() {
+  const t = make(SKY_W, SKY_H);
+  // Deep, cold, and nowhere near black: the whole shock of this frame is that
+  // there is light in it, forty minutes before there is any sun.
+  const ZENITH = [24, 30, 54];
+  const HORIZON = [104, 112, 132];
+  const WARM = [104, 66, 28];     // added into the quarter it is coming from
+
+  // WHERE THE SKY ACTUALLY IS. This texture spans the horizon to straight up,
+  // and almost none of it is ever on screen: the projection puts a row at
+  // atan((horizon - y)/H), so a player looking level sees elevations of nought
+  // to about twenty-six degrees — the bottom THIRTY PER CENT of this image.
+  // The first version had the cloud deck centred at a third of the way up and
+  // the stars above that, which meant a flat grey band and nothing else unless
+  // you happened to look at the ceiling. Everything worth seeing is now inside
+  // el < 0.34, and the top two thirds is the part you have to go and find.
+  const VIS = 0.30;
+
+  for (let y = 0; y < SKY_H; y++) {
+    const el = y / (SKY_H - 1);
+    // Most of the gradient is spent inside the visible band and the rest of it
+    // is dark blue, rather than a smooth ramp that only gets going off-screen.
+    const k = clamp(el / (VIS * 1.9), 0, 1) ** 0.78;
+    const base = [
+      HORIZON[0] + (ZENITH[0] - HORIZON[0]) * k,
+      HORIZON[1] + (ZENITH[1] - HORIZON[1]) * k,
+      HORIZON[2] + (ZENITH[2] - HORIZON[2]) * k,
+    ];
+    // The cloud deck, seen edge-on from underneath: heaviest a third of the way
+    // up the VISIBLE band, thinning above it, and flattening into haze as it
+    // approaches the horizon because that is what perspective does to a deck.
+    const bandK = Math.exp(-((el - VIS * 0.42) ** 2) / (VIS * VIS * 0.55)) *
+      clamp(1 - (el - VIS) * 1.4, 0.15, 1);
+
+    for (let x = 0; x < SKY_W; x++) {
+      // Stretched about six to one across the sky, and wrapping exactly, so
+      // there is no seam behind you.
+      const cloud = tfbm(x, y * 5.5, SKY_W, 0, 0.018, 4, 13, 77);
+      const wisp = tfbm(x, y * 7.0, SKY_W, 0, 0.062, 3, 91, 5);
+
+      // How far round the sky we are from the bearing the light is behind,
+      // 0..1, taking the short way round. Wide, because a narrow glow reads as
+      // a light source, and there is no light source out here.
+      let d = Math.abs(x / SKY_W - DAWN_BEARING);
+      if (d > 0.5) d = 1 - d;
+      const glow = Math.max(0, 1 - d * 2.2) ** 1.6 * Math.max(0, 1 - el / (VIS * 1.6));
+
+      let r = base[0] + WARM[0] * glow * 0.80;
+      let g = base[1] + WARM[1] * glow * 0.80;
+      let b = base[2] + WARM[2] * glow * 0.80;
+
+      // Cloud. Lit from underneath by the same quarter, grey everywhere else.
+      const c = clamp((cloud - 0.44) * 3.0, 0, 1) * bandK;
+      if (c > 0) {
+        const lit = 0.42 + glow * 1.05;
+        r += (44 + 128 * lit - r) * c * 0.88;
+        g += (48 + 112 * lit - g) * c * 0.88;
+        b += (66 + 100 * lit - b) * c * 0.88;
+      }
+      // A second, finer layer torn across the first.
+      const wc = clamp((wisp - 0.60) * 3.4, 0, 1) * bandK * 0.55;
+      if (wc > 0) { r += (140 - r) * wc; g += (144 - g) * wc; b += (156 - b) * wc; }
+
+      // What is left of the night: high, and never inside the cloud. These do
+      // not twinkle. Nothing out here moves, and that is the last wrong thing.
+      if (el > VIS * 0.55 && c < 0.30) {
+        const s = hash2(x * 1.7 + 3, y * 2.3 + 11);
+        if (s > 0.9975) {
+          const mag = (s - 0.9975) / 0.0025;
+          const a = (0.40 + mag * 0.60) *
+            clamp((el - VIS * 0.55) / 0.25, 0, 1) * (1 - c * 3.2);
+          r += (222 - r) * a; g += (228 - g) * a; b += (242 - b) * a;
+        }
+      }
+
+      // Haze BEFORE the trees, not after. Doing it the other way round hazed the
+      // silhouette out into the same value as the ground and put a bright seam
+      // between the two — the ground converges on the horizon colour inside the
+      // last screen row (your eye is a metre and a half up and the field is
+      // flat), so anything pale down here is a hard line rather than distance.
+      const haze = clamp(1 - el / (VIS * 0.28), 0, 1) ** 1.5 * 0.55;
+      r += (HORIZON[0] - r) * haze;
+      g += (HORIZON[1] - g) * haze;
+      b += (HORIZON[2] - b) * haze;
+
+      // THE TREELINE, over the top of all of it. Painted into the sky rather
+      // than modelled, for the reason every distant thing in this game is faked:
+      // at 480x270 a silhouette that does not parallax reads as *far away*, and
+      // a treeline you could walk up to and inspect would answer the question
+      // the whole ending is built on. It is also the first non-orthogonal shape
+      // in nine minutes of right angles, which is most of its job.
+      // Pushed out around 0.5 first. fBm of value noise has a standard
+      // deviation of about 0.13, so the raw field gives a skyline that wanders
+      // by a couple of pixels and reads as a hedge — the same trap the artery
+      // wander in world.js documents.
+      const spread = (v) => clamp((v - 0.5) * 2.4 + 0.5, 0, 1);
+      const ridge = spread(tfbm(x, 0, SKY_W, 0, 0.006, 3, 47, 3));
+      const crowns = spread(tfbm(x, 0, SKY_W, 0, 0.055, 3, 5, 61));
+      const scrub = tfbm(x, 0, SKY_W, 0, 0.20, 2, 71, 29);
+      // Individual crowns on a wandering ridge. Deliberately shallow — it is
+      // half a mile away and it should sit just off the bottom of the frame.
+      const top = VIS * (0.055 + ridge * 0.075 + crowns * 0.085 + scrub * 0.022);
+      if (el < top) {
+        const into = 1 - el / top;
+        // Solid most of the way up and broken at the top, so the skyline is
+        // trees rather than a band with a bitten edge.
+        const broken = into > 0.42 ? 1 : clamp(into / 0.42 + (scrub - 0.5) * 1.3, 0, 1);
+        // Never black. Dark against a pale sky is a silhouette; black against a
+        // pale sky is a hole in the frame.
+        const k2 = broken * 0.92;
+        r += (26 - r) * k2; g += (29 - g) * k2; b += (34 - b) * k2;
+      }
+
+      const grain = (hash2(x * 5 + 1, y * 5 + 7) - 0.5) * 5;
+      t.data[y * SKY_W + x] = packRGBA(
+        clamp(r + grain, 0, 255) | 0, clamp(g + grain, 0, 255) | 0, clamp(b + grain, 0, 255) | 0
+      );
+    }
+  }
+  return t;
+}
+
+// Wet ground. Sampled by the same affine floor cast and at the same texels per
+// metre as the carpet, so nothing in the renderer has to change — but going
+// from damp pile to mud and dead grass under your feet is the fastest and least
+// deniable way to say you are not in it any more, because the floor is the
+// surface you are looking at the whole time.
+//
+// The ALPHA byte carries standing water, which the floor pass turns into the
+// only place in the lower half of the frame where the sky appears.
+function groundTexture() {
+  const t = make(FS, FS);
+  for (let y = 0; y < FS; y++) {
+    for (let x = 0; x < FS; x++) {
+      // Ground shape first: broad hollows the water collects in.
+      const lie = tfbm(x, y, FS, FS, 0.014, 4, 7, 23);
+      const clump = tfbm(x, y, FS, FS, 0.075, 4, 51, 19);
+      const blades = tfbm(x, y, FS, FS, 0.30, 2, 3, 88);
+      const grain = (hash2(x * 3 + 5, y * 3 + 13) - 0.5) * 16;
+
+      // Mud: brown, cold, and nothing like the carpet. It has to carry at this
+      // ambient without the torch, so it sits a good deal lighter than anything
+      // indoors — a floor lit by the sky and a floor lit by a hand torch are
+      // different values, and this is the only one of the two that is not.
+      let r = 62 + lie * 34 + grain;
+      let g = 56 + lie * 30 + grain;
+      let b = 44 + lie * 21 + grain * 0.8;
+
+      // Dead grass over the top of it, in clumps rather than a lawn — olive
+      // going to straw, with the blades picked out by the fine layer.
+      const grass = clamp((clump - 0.40) * 2.3, 0, 1) * (1 - clamp((0.36 - lie) * 4, 0, 1));
+      if (grass > 0) {
+        const dry = 0.35 + blades * 0.95;
+        r += (74 + 56 * dry - r) * grass;
+        g += (76 + 50 * dry - g) * grass;
+        b += (46 + 26 * dry - b) * grass;
+      }
+
+      // Standing water in the hollows. Flat, smooth, and darker than the mud
+      // where it is deep — everything bright about a puddle is borrowed.
+      const wet = clamp((0.40 - lie) * 4.2, 0, 1) * clamp((0.66 - clump) * 3.2, 0, 1);
+      let water = 0;
+      if (wet > 0.02) {
+        // A hard edge. A puddle that fades out is a stain.
+        water = clamp((wet - 0.10) * 3.2, 0, 1);
+        const deep = water * 0.80;
+        r += (26 - r) * deep; g += (30 - g) * deep; b += (36 - b) * deep;
+      }
+
+      t.data[y * FS + x] = packRGBA(
+        clamp(r, 0, 255) | 0, clamp(g, 0, 255) | 0, clamp(b, 0, 255) | 0,
+        (water * 255) | 0
+      );
+    }
+  }
+  return t;
+}
+
 export const PITS = 64;   // shaft/floor texture size
 export const PIT_TILE = 2; // ...spanning this many world cells
 
@@ -851,6 +1049,11 @@ export function generateTextures() {
     // at all — the second one has windows in it.
     upper: upperTexture(false),
     upperWindow: upperTexture(true),
+    // Only ever drawn by ending vi. Generated at boot regardless, because they
+    // cost about as much as one wall stage and building them at the moment the
+    // door opens would drop the frame the whole ending is riding on.
+    sky: skyTexture(),
+    ground: groundTexture(),
     shaft: shaftTexture(),
     pitFloor: pitFloorTexture(),
     redEyes: redEyesTexture(),

@@ -50,7 +50,7 @@
 // Cells are addressed in absolute integer coordinates; chunks are generated
 // lazily the first time any ray or query touches them, then memoised forever.
 
-import { WORLD, DECALS } from './config.js';
+import { WORLD, DECALS, OUTSIDE } from './config.js';
 import { fbm, seedSalt, noiseEpoch } from './noise.js';
 import { hash2 } from './mathutils.js';
 import { WALL_STYLES } from './textures.js';
@@ -61,6 +61,10 @@ export const SOLID = 1;
 export const PIT = 2;
 export const PROP_ANCHOR = 4;
 export const GUN_ANCHOR = 8;
+// Bit 6. Not a district and not a landmark: the one place in the game that is
+// not in the building. See stampOutside below — it is written over the generator
+// rather than generated, because the whole point of it is that it was not.
+export const OUTSIDE_CELL = 64;
 
 // Bits 4-5 of a cell are which of four ceilings is over it. Height varies per
 // BLOCK, not per cell, but it is stored per cell so the renderer can ask the
@@ -498,6 +502,95 @@ export class World {
     this.chunks = new Map(); // numeric key -> Uint8Array(chunkSize*chunkSize)
     this._lastKey = NaN;     // one-entry cache; floor scanning is very coherent
     this._lastChunk = null;
+    // The outside. Null for almost every session, and for all of every session
+    // in which a round is fired — see director.js. { x0, y0, x1, y1, ... }
+    this.outside = null;
+  }
+
+  // Write the one place that is not generated.
+  //
+  // It is stamped a very long way from the spawn rather than spliced onto the
+  // district you happen to be standing in, for two reasons. The generator is a
+  // pure function of position with no seam logic in it, so grafting a field
+  // onto a warren would mean deciding what happens along every edge; and out
+  // here nothing has ever been asked about these cells, so no chunk needs
+  // invalidating and no walk can reach the join.
+  //
+  // Layout, with the building along the top of the block and the field below it
+  // in decreasing y — which is the direction you are facing when you arrive:
+  //
+  //     . . . . . . . . . . . . . .     open ground, ~145 cells of it
+  //     . . . . . . . . . . . . . .
+  //     # # # # # #     # # # # # #     the wall, four cells thick, with bays
+  //     # # # # # #     # # # # # #     and one gap in it
+  //
+  // The whole region has to be deeper than the raycaster can see (64 cells) in
+  // every direction from anywhere you are allowed to stand, or the far edge of
+  // it — where the building starts again — would be in shot.
+  stampOutside() {
+    if (this.outside) return this.outside;
+    const [ox, oy] = OUTSIDE.origin;
+    const w = OUTSIDE.width, h = OUTSIDE.height;
+    const doorX = ox + (w >> 1);
+    const wallY = oy + h - OUTSIDE.wallDepth;   // first row of the wall
+    this.outside = {
+      x0: ox, y0: oy, x1: ox + w, y1: oy + h,
+      wallY, doorX, doorW: OUTSIDE.doorWidth,
+      // Where you are standing when the light comes back: a stride clear of the
+      // doorway, facing away from the building.
+      spawnX: doorX + OUTSIDE.doorWidth / 2,
+      spawnY: wallY - 1.4,
+      angle: -Math.PI / 2,
+    };
+    // Anything already built here would have been built from the generator.
+    // Nothing ever is, but a stale chunk would be invisible and permanent, so
+    // it costs one loop to be sure.
+    for (let cy = oy - chunkSize; cy < oy + h + chunkSize; cy += chunkSize) {
+      for (let cx = ox - chunkSize; cx < ox + w + chunkSize; cx += chunkSize) {
+        this.chunks.delete((((cx >> CHUNK_SHIFT) & 0xffff) << 16) |
+                           ((cy >> CHUNK_SHIFT) & 0xffff));
+      }
+    }
+    this._lastKey = NaN;
+    this._lastChunk = null;
+    return this.outside;
+  }
+
+  // Flags for one cell of the region, or -1 if this cell is not in it.
+  //
+  // The ceiling class is CEIL_HIGH rather than CEIL_OPEN, which looks like the
+  // wrong choice for a place with no ceiling and is the whole trick: the height
+  // of a wall column is the height of the space it FACES, so this is what stops
+  // the building's outside wall running up out of the frame like the façades in
+  // an expanse block. It tops out at seven metres and there is sky above it.
+  // Nothing draws the ceiling plane itself — the renderer skips the ceiling
+  // pass entirely out here.
+  _outsideFlags(cx, cy) {
+    const o = this.outside;
+    if (cx < o.x0 || cx >= o.x1 || cy < o.y0 || cy >= o.y1) return -1;
+    const ceil = CEIL_HIGH << CEIL_SHIFT;
+    if (cy < o.wallY - 2) return OUTSIDE_CELL | ceil;    // clear ground
+
+    // The doorway. Two cells deep and then SEALED — walk back into it and there
+    // is a wall two metres in. That is not a technicality about keeping you out
+    // of the generator (though it is also that: past the region the districts
+    // start again, holes and all). It is the better image. The way back is a
+    // recess with nothing in it.
+    const inDoor = cx >= o.doorX && cx < o.doorX + o.doorW;
+    // Bays. A dead straight wall gives a dead straight roofline, and a roofline
+    // is most of what tells you that the thing behind you is a building rather
+    // than a wall. Every ninth column or so the frontage steps out into the
+    // field — and the parts that step out are a storey lower, so the skyline
+    // has something to do. See the renderer: out here a wall's height comes
+    // from the WALL cell rather than from the space in front of it, which is
+    // the only reason a varying roofline is possible at all.
+    const bay = !inDoor && Math.abs(cx - o.doorX) > 3 &&
+      hash2(Math.floor(cx / 9) * 3.7 + 5.1, 19.3) > 0.62;
+    const height = (bay ? CEIL_STD : CEIL_HIGH) << CEIL_SHIFT;
+    const front = o.wallY - (bay ? 2 : 0);
+    if (cy < front) return OUTSIDE_CELL | ceil;
+    if (inDoor && cy < o.wallY + 2) return OUTSIDE_CELL | ceil;
+    return SOLID | height;
   }
 
   _getChunk(ccx, ccy) {
@@ -508,10 +601,16 @@ export class World {
       chunk = new Uint8Array(chunkSize * chunkSize);
       const baseX = ccx * chunkSize;
       const baseY = ccy * chunkSize;
+      // Only pay for the region test on the handful of chunks that touch it.
+      const o = this.outside;
+      const over = !!o && baseX < o.x1 && baseX + chunkSize > o.x0 &&
+                          baseY < o.y1 && baseY + chunkSize > o.y0;
       let hasPit = false, ceilBits = 0;
       for (let y = 0; y < chunkSize; y++) {
         for (let x = 0; x < chunkSize; x++) {
-          const f = computeFlags(baseX + x, baseY + y);
+          const cx = baseX + x, cy = baseY + y;
+          let f = over ? this._outsideFlags(cx, cy) : -1;
+          if (f < 0) f = computeFlags(cx, cy);
           if (f & PIT) hasPit = true;
           ceilBits |= 1 << ((f & CEIL_MASK) >> CEIL_SHIFT);
           chunk[y * chunkSize + x] = f;
@@ -553,6 +652,10 @@ export class World {
   // Open to look across, and there is no floor. You can walk into one of these.
   // Nothing else can.
   isPit(cx, cy) { return (this.flags(cx, cy) & PIT) !== 0; }
+
+  // Not in the building. True only for cells of the stamped region, and only in
+  // a session that reached it. The props scatterer and the renderer both ask.
+  isOutside(cx, cy) { return (this.flags(cx, cy) & OUTSIDE_CELL) !== 0; }
 
   // Cannot be walked into by anything that has any sense — which is everything
   // in the building except you. The player deliberately does NOT use this: see

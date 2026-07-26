@@ -381,6 +381,31 @@ kbd.wide { min-width: auto; letter-spacing: 0.1em; }
   100% { opacity: 1; }
 }
 
+/* --- the one that is not a death -------------------------------------------
+   Five endings arrive out of black and this one arrives out of white, so it
+   cannot use the black card: coming up dark after the sky has just overexposed
+   would read as the game having cut away from the thing you earned. It holds
+   the white the frame is already at and settles back off it, and the type is
+   the only dark thing on the screen.
+
+   Deliberately not warm and not congratulatory. It is an overcast morning, and
+   the note under it is still doing the same work every other note does. */
+#overlay.mode-dead.out {
+  background: radial-gradient(ellipse at center,
+    rgba(238, 238, 236, 0.97) 0%, rgba(198, 202, 208, 0.99) 100%);
+  animation: dawn-in 1.5s ease-out both;
+}
+#overlay.mode-dead.out #overlay-eyebrow { color: rgba(74, 84, 104, 0.85); }
+#overlay.mode-dead.out #overlay-title   { color: #22262e; }
+#overlay.mode-dead.out #overlay-note    { color: rgba(46, 52, 62, 0.82); }
+#overlay.mode-dead.out #overlay-action  { color: rgba(50, 56, 68, 0.55); }
+
+@keyframes dawn-in {
+  0%   { opacity: 1; filter: brightness(1.9); }
+  30%  { opacity: 1; filter: brightness(1.35); }
+  100% { opacity: 1; filter: brightness(1); }
+}
+
 /* --- the collection --------------------------------------------------------
    One row per ending. A row you have reached is its numeral and its name; a row
    you have not is its numeral and a run of dots exactly as long as the name it

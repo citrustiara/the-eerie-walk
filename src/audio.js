@@ -22,6 +22,8 @@ export class AudioEngine {
     this._nextBreath = 0;
     this.breath = 0;         // 0..1 creature breathing loudness
     this.breathPan = 0;
+    this.wind = null;        // only ever built once you are through the door
+    this.humSilenced = false;
   }
 
   // Must be called from a user gesture (the canvas click / pointer lock).
@@ -144,7 +146,11 @@ export class AudioEngine {
   update(dread, dt = 0.016) {
     if (!this.started) return;
     const ctx = this.ctx, t = ctx.currentTime;
-    this.humGain.gain.setTargetAtTime(AUDIO.humVolume * (1 + dread * 0.8), t, 1.5);
+    // Once the building has been left, dread does not get to keep turning its
+    // mains supply up. Nothing sets this back — there is no way back in.
+    if (!this.humSilenced) {
+      this.humGain.gain.setTargetAtTime(AUDIO.humVolume * (1 + dread * 0.8), t, 1.5);
+    }
 
     if (this.heart > 0.01) {
       // Faster and harder the closer it is: 62 bpm at rest, 140 at its worst.
@@ -263,16 +269,133 @@ export class AudioEngine {
     src.start(t); src.stop(t + 3.0);
   }
 
+  // The door announcing itself. A pit draught falls away from you and gets
+  // lower; this comes toward you and opens up, because the whole tell is that
+  // the air is moving the wrong way for a sealed building. Same trick as the
+  // pistol's clink: you cannot see it turn up, so you get to hear it.
+  playDraught(pan = 0, volume = 0.22) {
+    if (!this.started) return;
+    const ctx = this.ctx, t = ctx.currentTime;
+    const src = ctx.createBufferSource(); src.buffer = this._longNoise; src.loop = true;
+    src.playbackRate.value = 0.72;
+    const bp = ctx.createBiquadFilter(); bp.type = 'bandpass'; bp.Q.value = 0.9;
+    bp.frequency.setValueAtTime(180, t);
+    bp.frequency.exponentialRampToValueAtTime(620, t + 1.8);
+    bp.frequency.exponentialRampToValueAtTime(240, t + 3.4);
+    const g = ctx.createGain(); g.gain.value = 0;
+    const p = ctx.createStereoPanner(); p.pan.value = pan;
+    src.connect(bp).connect(g).connect(p).connect(this.master);
+    const send = ctx.createGain(); send.gain.value = 0.5;
+    p.connect(send).connect(this.reverb);
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.linearRampToValueAtTime(volume, t + 1.1);
+    g.gain.linearRampToValueAtTime(0.0001, t + 3.5);
+    src.start(t); src.stop(t + 3.6);
+  }
+
+  // Going through it. A closer letting go, the weight of a fire door swinging,
+  // and then — the part that matters — the room tone is not there any more.
+  // Everything that follows this happens in the open air.
+  playDoorOpen() {
+    if (!this.started) return;
+    const ctx = this.ctx, t = ctx.currentTime;
+    // The bar, then the latch.
+    const clack = (at, freq, vol) => {
+      const src = ctx.createBufferSource(); src.buffer = this._noise;
+      src.playbackRate.value = 1.6;
+      const bp = ctx.createBiquadFilter(); bp.type = 'bandpass';
+      bp.frequency.value = freq; bp.Q.value = 3.2;
+      const g = ctx.createGain(); g.gain.value = 0;
+      src.connect(bp).connect(g).connect(this.master);
+      const send = ctx.createGain(); send.gain.value = 0.55;
+      g.connect(send).connect(this.reverb);
+      g.gain.setValueAtTime(0.0001, at);
+      g.gain.linearRampToValueAtTime(vol, at + 0.004);
+      g.gain.exponentialRampToValueAtTime(0.0001, at + 0.16);
+      src.start(at); src.stop(at + 0.2);
+    };
+    clack(t, 1900, 0.42);
+    clack(t + 0.09, 760, 0.30);
+    // The swing: a long, dry sweep of air with the hinge complaining in it.
+    const src = ctx.createBufferSource(); src.buffer = this._longNoise; src.loop = true;
+    src.playbackRate.value = 0.6;
+    const lp = ctx.createBiquadFilter(); lp.type = 'lowpass';
+    lp.frequency.setValueAtTime(420, t + 0.1);
+    lp.frequency.linearRampToValueAtTime(2600, t + 1.5);
+    const g = ctx.createGain(); g.gain.value = 0;
+    src.connect(lp).connect(g).connect(this.master);
+    g.gain.setValueAtTime(0.0001, t + 0.1);
+    g.gain.linearRampToValueAtTime(0.20, t + 0.8);
+    g.gain.linearRampToValueAtTime(0.0001, t + 2.2);
+    src.start(t + 0.1); src.stop(t + 2.3);
+    const o = ctx.createOscillator(); o.type = 'sawtooth';
+    o.frequency.setValueAtTime(320, t + 0.12);
+    o.frequency.exponentialRampToValueAtTime(196, t + 0.9);
+    const oq = ctx.createBiquadFilter(); oq.type = 'bandpass';
+    oq.frequency.value = 480; oq.Q.value = 5;
+    const og = ctx.createGain(); og.gain.value = 0;
+    o.connect(oq).connect(og).connect(this.master);
+    og.gain.setValueAtTime(0.0001, t + 0.12);
+    og.gain.linearRampToValueAtTime(0.055, t + 0.35);
+    og.gain.linearRampToValueAtTime(0.0001, t + 1.0);
+    o.start(t + 0.12); o.stop(t + 1.1);
+  }
+
+  // Outside. The hum is the building — sixty hertz off a supply that should not
+  // still be live — so out here it has to go, and something has to be in the
+  // hole it leaves or the ending sounds like the audio has crashed.
+  //
+  // Wind is two lowpassed noise loops at different rates with slow, unrelated
+  // LFOs on their gains, so it swells and drops without a period you can hear.
+  // It is the only continuous sound in the game with no pitch in it at all.
+  startWind() {
+    if (!this.started || this.wind) return;
+    const ctx = this.ctx, t = ctx.currentTime;
+    const out = ctx.createGain(); out.gain.value = 0;
+    out.connect(this.master);
+    const send = ctx.createGain(); send.gain.value = 0.30;
+    out.connect(send).connect(this.reverb);
+
+    for (const [rate, freq, q, lfoHz, depth] of
+         [[0.35, 380, 0.6, 0.061, 0.55], [0.8, 900, 0.35, 0.037, 0.32]]) {
+      const src = ctx.createBufferSource();
+      src.buffer = this._longNoise; src.loop = true;
+      src.playbackRate.value = rate;
+      const lp = ctx.createBiquadFilter();
+      lp.type = 'lowpass'; lp.frequency.value = freq; lp.Q.value = q;
+      const g = ctx.createGain(); g.gain.value = 1 - depth;
+      src.connect(lp).connect(g).connect(out);
+      const lfo = ctx.createOscillator(); lfo.frequency.value = lfoHz;
+      const lg = ctx.createGain(); lg.gain.value = depth;
+      lfo.connect(lg).connect(g.gain);
+      lfo.start(t); src.start(t);
+      // A very slow drift on the cutoff as well, so it is not one colour of
+      // noise being turned up and down.
+      const flfo = ctx.createOscillator(); flfo.frequency.value = lfoHz * 0.41;
+      const fg = ctx.createGain(); fg.gain.value = freq * 0.35;
+      flfo.connect(fg).connect(lp.frequency);
+      flfo.start(t);
+    }
+    this.wind = out;
+    // The building lets go over a couple of seconds rather than being cut, so
+    // the last of the hum is still under the first of the wind.
+    this.humGain.gain.cancelScheduledValues(t);
+    this.humGain.gain.setTargetAtTime(0.0001, t, 0.9);
+    this.humSilenced = true;
+  }
+
+  setWind(k, time = 1.2) {
+    if (!this.started || !this.wind) return;
+    const t = this.ctx.currentTime;
+    this.wind.gain.setTargetAtTime(Math.max(0.0001, k), t, time);
+  }
+
   // Going down one. Air past your ears: broadband noise opening up and rising
   // as it goes, with the reverb wound right up because the shaft is the only
   // genuinely large space in the building.
   //
-  // This was authored against a fall that took a second and a half, and it
-  // faded *in* over a third of a second — so the loudest part of the sound of
-  // falling arrived after you had already landed. The drop is now under six
-  // tenths of a second and this is shaped to it: full volume in three
-  // hundredths, the whole sweep done in half a second, and the impact cutting
-  // off whatever is left.
+  // The physical drop lasts about 1.4 seconds, so the rush builds with speed and
+  // reaches its peak just before impact.
   playFallRush() {
     if (!this.started) return;
     const ctx = this.ctx, t = ctx.currentTime;
@@ -280,28 +403,28 @@ export class AudioEngine {
     src.playbackRate.value = 0.7;
     const bp = ctx.createBiquadFilter(); bp.type = 'bandpass'; bp.Q.value = 0.7;
     bp.frequency.setValueAtTime(240, t);
-    bp.frequency.exponentialRampToValueAtTime(1400, t + 0.5);
+    bp.frequency.exponentialRampToValueAtTime(1400, t + 1.3);
     const g = ctx.createGain(); g.gain.value = 0;
     src.connect(bp).connect(g).connect(this.master);
     const send = ctx.createGain(); send.gain.value = 0.85;
     g.connect(send).connect(this.reverb);
     g.gain.setValueAtTime(0.0001, t);
-    g.gain.linearRampToValueAtTime(0.46, t + 0.03);
-    g.gain.linearRampToValueAtTime(0.60, t + 0.5);
-    g.gain.linearRampToValueAtTime(0.0001, t + 0.95);
-    src.start(t); src.stop(t + 1.0);
+    g.gain.linearRampToValueAtTime(0.22, t + 0.22);
+    g.gain.linearRampToValueAtTime(0.60, t + 1.25);
+    g.gain.linearRampToValueAtTime(0.0001, t + 1.5);
+    src.start(t); src.stop(t + 1.55);
     // ...and one note underneath it, going down with you and getting there
     // first. The lurch in the stomach is this, not the noise.
     const o = ctx.createOscillator(); o.type = 'sawtooth';
     o.frequency.setValueAtTime(210, t);
-    o.frequency.exponentialRampToValueAtTime(30, t + 0.55);
+    o.frequency.exponentialRampToValueAtTime(30, t + 1.3);
     const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 420;
     const og = ctx.createGain(); og.gain.value = 0;
     o.connect(lp).connect(og).connect(this.master);
     og.gain.setValueAtTime(0.0001, t);
-    og.gain.linearRampToValueAtTime(0.16, t + 0.02);
-    og.gain.linearRampToValueAtTime(0.0001, t + 0.7);
-    o.start(t); o.stop(t + 0.75);
+    og.gain.linearRampToValueAtTime(0.16, t + 0.12);
+    og.gain.linearRampToValueAtTime(0.0001, t + 1.45);
+    o.start(t); o.stop(t + 1.5);
   }
 
   // The bottom. One very short, very loud crack of noise over a body-thump, and

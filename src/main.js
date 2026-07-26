@@ -111,9 +111,10 @@ function renderEndings() {
 }
 
 // Every overlay state goes through here, so none of them can inherit a line
-// from the one before.
-function setOverlay(next, { eyebrow = '', title, note = '', action }) {
-  overlay.className = `mode-${next}`;
+// from the one before. `variant` is how the one ending that is not a death gets
+// to look like it: pale card, dark text, the inverse of every other one.
+function setOverlay(next, { eyebrow = '', title, note = '', action, variant = '' }) {
+  overlay.className = `mode-${next}${variant ? ' ' + variant : ''}`;
   overlayEyebrow.textContent = eyebrow;
   overlayTitle.textContent = title;
   overlayNote.textContent = note;
@@ -213,6 +214,23 @@ director.onRefusal = () => {
   renderer.punch();
   beginDying();
 };
+// Through the door. Everything the building gave you is put down here — the
+// weapon, the count of what is left in it, the line at the bottom of the screen
+// — because none of it means anything on the other side and a magazine readout
+// over a field would be the single worst frame in the game.
+// The sky has started to overexpose and the run is finished. Locked the same
+// way the drop and the face are, so the last two seconds cannot be paused or
+// escaped out of — you keep walking through them, and that is the point.
+director.onFinale = () => beginDying();
+director.onOutside = () => {
+  gunEquipped = false;
+  reticle.classList.remove('visible');
+  hud.classList.remove('visible');
+  stamina.classList.remove('visible');
+  subtitle.classList.remove('visible');
+  hideGunHint();
+  document.body.classList.remove('refusing');
+};
 // ...and this is the frame the face lets go on.
 director.onDeath = (id) => showDeath(id);
 director.onLine = showLine;
@@ -270,6 +288,9 @@ function showDeath(id) {
     title: e.title,
     note: e.note,
     action: 'click to go on',
+    // Five of these are a death. The sixth comes up out of a white frame and
+    // has to look like it did, or the list reads as six of the same thing.
+    variant: e.id === 'outside' ? 'out' : '',
   });
 }
 
@@ -366,8 +387,11 @@ let last = performance.now();
 let loopFailures = 0;
 
 function step(dt, t) {
-  // While the face is on the screen you do not get to walk away from it.
-  const frozen = director.scareT > 0 || director.refusalDeathT > 0;
+  // While the face is on the screen you do not get to walk away from it — and
+  // the same goes for the second or so of torch failure that is moving you from
+  // one side of the door to the other, where there is briefly no honest answer
+  // to the question of where you are.
+  const frozen = director.scareT > 0 || director.refusalDeathT > 0 || director.locked;
   if (!frozen) {
     const blockers = props.near(player.x, player.y, 2.5);
     player.update(dt, input, blockers);

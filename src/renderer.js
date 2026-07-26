@@ -36,7 +36,10 @@ import { hash2, clamp } from './mathutils.js';
 import { BloodDecals, DECAL_SIZE } from './decals.js';
 import { METER } from './mesh.js';
 import { fbm } from './noise.js';
-import { FS, FTILE, WALL_W, WALL_H, WTILE, PITS, PIT_TILE, UP_W, UP_H, UP_SPAN, UP_TOP } from './textures.js';
+import {
+  FS, FTILE, WALL_W, WALL_H, WTILE, PITS, PIT_TILE, UP_W, UP_H, UP_SPAN, UP_TOP,
+  SKY_W, SKY_H,
+} from './textures.js';
 import { CEIL_HEIGHT, CEIL_LOW, CEIL_STD, CEIL_HIGH, CEIL_OPEN } from './world.js';
 
 const W = RENDER.width;
@@ -81,8 +84,18 @@ const MAX_RISERS = 3;
 const MESH_GRAIN = 64;
 
 // Lighting lookup-table resolution (avoids per-pixel Math.exp).
-const DMAX = 26, DN = 1024, DIST_SCALE = DN / DMAX;
+//
+// DMAX is the DEFAULT far end of the tables, not a fixed one. Inside the
+// building 26 units is far past anything 0.2 fog will ever show you, and the
+// floor cast clamping its row distance there is invisible. Outside the fog is a
+// fifth of that, so the clamp would draw a hard ring of repeated ground about
+// twenty-six metres out — see _setViewDistance.
+const DMAX = 26, DN = 1024;
 const R2MAX = 12, BN = 2048, R2_SCALE = BN / R2MAX;
+// What a puddle shows you. Not the horizon — the sky overhead, which is a good
+// deal bluer, so standing water stays readable against haze that is resolving
+// to the pale colour at the bottom of the sky.
+const PUDDLE_SKY = [78, 88, 116];
 
 function edge(ax, ay, bx, by, px, py) {
   return (px - ax) * (by - ay) - (py - ay) * (bx - ax);
@@ -125,12 +138,17 @@ export class Renderer {
       const r2 = i / R2_SCALE;
       this.beamShape[i] = Math.exp(-r2 * LIGHT.beamCoreFalloff);
     }
+    // Both distance tables are indexed by distance * distScale, so both have to
+    // be rebuilt when the view distance moves. That happens twice a session at
+    // most, and never inside the building.
+    this.dmax = 0;
+    this.distScale = 1;
     this.torchDist = new Float32Array(DN);
-    for (let i = 0; i < DN; i++) {
-      const d = i / DIST_SCALE;
-      this.torchDist[i] = 1 / (1 + d * d * LIGHT.beamDistFalloff);
-    }
     this.fogTable = new Float32Array(DN); // rebuilt per frame (density varies)
+    this._setViewDistance(DMAX);
+    // Compass bearing of each screen column, as a sky texture coordinate. One
+    // atan2 per column per frame, only while there is a sky to draw.
+    this.skyU = new Int32Array(W);
 
     // --- Vignette (radial edge darkening) ---------------------------------
     this.vign = new Float32Array(W * H);
@@ -153,9 +171,83 @@ export class Renderer {
     this.kickPitch = 0;
   }
 
-  _rebuildFog(density) {
+  // How far the tables reach. The torch falloff is a function of true distance,
+  // so rescaling the index means rebuilding it — cheap, and it only ever happens
+  // when the fog lets go.
+  _setViewDistance(dmax) {
+    if (dmax === this.dmax) return;
+    this.dmax = dmax;
+    this.distScale = DN / dmax;
     for (let i = 0; i < DN; i++) {
-      this.fogTable[i] = Math.exp(-(i / DIST_SCALE) * density);
+      const d = i / this.distScale;
+      this.torchDist[i] = 1 / (1 + d * d * LIGHT.beamDistFalloff);
+    }
+  }
+
+  _rebuildFog(density) {
+    const s = this.distScale;
+    for (let i = 0; i < DN; i++) {
+      this.fogTable[i] = Math.exp(-(i / s) * density);
+    }
+  }
+
+  // The sky, sampled by where the ray is pointing rather than by where anything
+  // is — u is the bearing of the column, v is the elevation of the row. That is
+  // what makes it infinitely far away: it does not move when you do.
+  //
+  // It is not fogged. It cannot be: the bottom of the sky texture IS the fog
+  // colour (OUTSIDE.horizon), so everything on the ground recedes into exactly
+  // the value the air above the treeline already has, and the two meet without
+  // a seam. Fogging the sky as well would just wash the whole thing flat.
+  _drawSky(env, horizon, ceilY1, rdx0, rdy0, rdx1, rdy1) {
+    const buf = this.buf, sky = this.tex.sky;
+    if (!sky) return;
+    const data = sky.data, skyU = this.skyU;
+    const INV = SKY_W / (Math.PI * 2);
+    for (let x = 0; x < W; x++) {
+      const t = x / W;
+      let a = Math.atan2(rdy0 + (rdy1 - rdy0) * t, rdx0 + (rdx1 - rdx0) * t);
+      if (a < 0) a += Math.PI * 2;
+      let u = (a * INV) | 0;
+      if (u >= SKY_W) u = SKY_W - 1;
+      skyU[x] = u;
+    }
+    // It goes on getting lighter for as long as you stand there. Nothing else
+    // about the sky ever changes — no drift, no twinkle — and the stillness is
+    // the only thing out here that is still wrong.
+    const lift = env.skyLift == null ? 1 : env.skyLift;
+    // THE SKIRT, and it is the difference between a field and a lake.
+    //
+    // The ground converges on the fog colour within a couple of screen rows of
+    // the horizon — your eye is a metre and a half up and the field is flat —
+    // so the last rows of it come out as a clean pale band. Under a dark
+    // treeline that reads as standing water at the bottom of the picture.
+    //
+    // The cause is that the trees are painted at infinity and therefore occlude
+    // nothing, where a real treeline stands ON the ground and hides the far
+    // field behind it. So the sky is allowed a few rows BELOW the horizon: row
+    // zero of the texture is unbroken trunk everywhere (the crowns only ever
+    // vary the top edge), so what those rows paint is exactly the base of the
+    // treeline, sitting on the ground where it belongs.
+    const y1 = Math.min(H, ceilY1 + 3);
+    for (let y = 0; y < y1; y++) {
+      // Screen rows are affine in h/d, so the elevation of a row is the arctan
+      // of its offset from the horizon — the same projection the walls use, and
+      // therefore a roofline that meets the sky where it should.
+      let sy = (Math.atan2(horizon - y, H) * (2 / Math.PI) * (SKY_H - 1)) | 0;
+      if (sy < 0) sy = 0; else if (sy >= SKY_H) sy = SKY_H - 1;
+      const row = sy * SKY_W, out = y * W;
+      if (lift >= 0.999) {
+        for (let x = 0; x < W; x++) buf[out + x] = data[row + skyU[x]];
+      } else {
+        for (let x = 0; x < W; x++) {
+          const c = data[row + skyU[x]];
+          buf[out + x] = (0xff000000
+            | ((((c >> 16) & 255) * lift) | 0) << 16
+            | ((((c >> 8) & 255) * lift) | 0) << 8
+            | (((c & 255) * lift) | 0)) >>> 0;
+        }
+      }
     }
   }
 
@@ -239,8 +331,17 @@ export class Renderer {
   render(player, world, env) {
     const buf = this.buf, zbuf = this.zbuf, ceilingZ = this.ceilingZ;
     const tex = this.tex;
+    // Outside, the fog stops holding the picture in and the eye has to be
+    // allowed to go three times as far. Everywhere else this is the constant it
+    // has always been.
+    this._setViewDistance(env.viewDistance || DMAX);
+    const DIST_SCALE = this.distScale, DMAXV = this.dmax;
     this._rebuildFog(env.fogDensity);
     ceilingZ.fill(1e30);
+    // The one place in the game that is not the building. It has no ceiling to
+    // cast, its ground is not carpet, and its walls are the outside of the
+    // thing you have spent the last ten minutes inside.
+    const outside = !!env.outside;
 
     // View basis, with anomaly FOV-breathing applied to the camera plane.
     const dirX = player.dirX, dirY = player.dirY;
@@ -303,10 +404,13 @@ export class Renderer {
     // ---- 1. Floor -----------------------------------------------------------
     const rdx0 = dirX - planeX, rdy0 = dirY - planeY;
     const rdx1 = dirX + planeX, rdy1 = dirY + planeY;
-    const floorTex = tex.floor.data;
+    const floorTex = outside ? tex.ground.data : tex.floor.data;
     const panelEmit = env.panelEmissive || 0;
     const anyPits = world.anyPitNear(posX, posY);
     const pitK = 1 + PIT.depth / eye;
+    // Standing water. It is the only thing below the horizon that shows you the
+    // sky, and it is most of what stops the ground reading as a brown plane.
+    const pudR = PUDDLE_SKY[0], pudG = PUDDLE_SKY[1], pudB = PUDDLE_SKY[2];
 
     // The horizon is allowed to leave the screen entirely — pitch swings well
     // past a 270 px buffer — so both halves are clamped rather than assumed.
@@ -318,7 +422,7 @@ export class Renderer {
       let p = y - horizon;
       if (p < 0.5) p = 0.5;
       let rowDist = (eye * H) / p;
-      if (rowDist > DMAX) rowDist = DMAX;
+      if (rowDist > DMAXV) rowDist = DMAXV;
 
       const stepX = rowDist * (rdx1 - rdx0) / W;
       const stepY = rowDist * (rdy1 - rdy0) / W;
@@ -340,7 +444,18 @@ export class Renderer {
         const tx = ((fx * FSCALE + FBIAS) | 0) & FMASK;
         const ty = ((fy * FSCALE + FBIAS) | 0) & FMASK;
         const texel = floorTex[ty * FS + tx];
-        buf[rowBase + x] = lit(x, y, rowDist, texel & 255, (texel >> 8) & 255, (texel >> 16) & 255);
+        let tr = texel & 255, tg = (texel >> 8) & 255, tb = (texel >> 16) & 255;
+        // The alpha byte of the ground is standing water — see groundTexture.
+        // Nothing else in the game uses the floor's fourth channel, so this
+        // costs one compare per pixel and only outside.
+        if (outside) {
+          const wet = texel >>> 24;
+          if (wet) {
+            const k = wet / 320;               // never a mirror; it is a puddle
+            tr += (pudR - tr) * k; tg += (pudG - tg) * k; tb += (pudB - tb) * k;
+          }
+        }
+        buf[rowBase + x] = lit(x, y, rowDist, tr, tg, tb);
         fx += stepX; fy += stepY;
       }
     }
@@ -355,7 +470,12 @@ export class Renderer {
     //
     // The band starts as fog, which is what an open block's ceiling IS: nothing,
     // at an unbounded distance. Everything else writes over it.
-    if (ceilY1 > 0) {
+    if (ceilY1 > 0 && outside) {
+      // There is no ceiling out here and nothing to cast. The band is sky, and
+      // the building's own wall is drawn over the bottom of it by the wall pass,
+      // which is how you get a roofline.
+      this._drawSky(env, horizon, ceilY1, rdx0, rdy0, rdx1, rdy1);
+    } else if (ceilY1 > 0) {
       const bits = world.ceilBitsNear(posX, posY);
       const single = (bits & (bits - 1)) === 0;   // one height in sight
       if (!single || bits === (1 << CEIL_OPEN)) {
@@ -376,7 +496,7 @@ export class Renderer {
           let p = horizon - y;
           if (p < 0.5) p = 0.5;
           let rowDist = (rise * H) / p;
-          if (rowDist > DMAX) rowDist = DMAX;
+          if (rowDist > DMAXV) rowDist = DMAXV;
 
           const stepX = rowDist * (rdx1 - rdx0) / W;
           const stepY = rowDist * (rdy1 - rdy0) / W;
@@ -471,8 +591,19 @@ export class Renderer {
         : (mapY - posY + (1 - stepY) / 2) / rdy;
       zbuf[x] = perp;
 
-      const spaceCls = world.ceilClass(prevX, prevY);
-      const wallTop = CEIL_HEIGHT[spaceCls];
+      // A wall is as tall as the space it FACES. Outside that space is the same
+      // for every column, and it is deliberately not CEIL_OPEN: an open block's
+      // façades run up out of the frame, and the one thing the building's own
+      // outside wall has to do is stop, at seven metres, with sky above it.
+      const spaceCls = outside ? CEIL_HIGH : world.ceilClass(prevX, prevY);
+      // ...and outside, the height comes off the WALL cell instead, which is the
+      // one place in the game that rule is inverted. Inside, every wall of a
+      // room is the height of that room and reading it off the wall would give
+      // you a corridor whose two sides were different heights. Outside there is
+      // no room — there is a frontage, and a frontage has a roofline.
+      const wallTop = outside
+        ? CEIL_HEIGHT[world.ceilClass(mapX, mapY)]
+        : CEIL_HEIGHT[spaceCls];
       const drawEnd = horizon + eye * H / perp;
       // Open districts are the exterior/city spaces. Their enclosing façades
       // continue above the visible frame instead of ending at the top of the
@@ -519,7 +650,13 @@ export class Renderer {
       // same brightness. One noise sample per column, not per pixel.
       const hx = side === 0 ? mapX : wallU, hy = side === 0 ? wallU : mapY;
       const grime = 0.74 + fbm(hx * 0.085 + 11, hy * 0.085 + 7, 2) * 0.58;
-      const sideDark = (side === 1 ? 0.74 : 1.0) * grime;
+      // Outside, everything is lit by the sky and a vertical face gets a small
+      // fraction of what the ground does — the ground is under the whole dome
+      // and the wall can only see half of it. Without this the ambient that
+      // makes the field read at all turns the building into sunlit sandstone,
+      // and the one thing the frontage has to be is a dark mass with a pale sky
+      // behind it.
+      const sideDark = (side === 1 ? 0.74 : 1.0) * grime * (outside ? 0.42 : 1);
 
       let y0 = drawStart < 0 ? 0 : drawStart | 0;
       let y1 = drawEnd > H ? H : drawEnd | 0;
@@ -690,7 +827,7 @@ export class Renderer {
       const feetY = horizon + (eye - (e.z || 0)) * H / tY;
       const startY = feetY - spriteH;
 
-      let di = tY * DIST_SCALE; if (di >= DN) di = DN - 1; di |= 0;
+      let di = tY * this.distScale; if (di >= DN) di = DN - 1; di |= 0;
       const fog = fogTable[di];
       const isVoid = !!e.void;
       const isGlow = !!e.glow;
@@ -1339,6 +1476,12 @@ export class Renderer {
     // A flash of black — the creature's exit. Applied last so it takes the
     // grain and the vignette down with it and the frame really is gone.
     const dark = 1 - clamp(env.darkFlash || 0, 0, 1);
+    // ...and its opposite, which happens exactly once. Every other way out of
+    // this game is a cut to black; the sky going past what the frame can hold
+    // is the only white one, and it has to take the vignette and the grain with
+    // it in the same way or it reads as a white rectangle laid over a picture
+    // rather than as an overexposure.
+    const white = clamp(env.whiteFlash || 0, 0, 1);
 
     for (let y = 0; y < H; y++) {
       const rowBase = y * W;
@@ -1367,6 +1510,11 @@ export class Renderer {
         r = (r * v * gr + gn + flashWash) * dark;
         g = (g * v * gg + gn + flashWash * 0.85) * dark;
         b = (b * v * gb + gn + flashWash * 0.62) * dark;
+        if (white > 0) {
+          r += (255 - r) * white;
+          g += (255 - g) * white;
+          b += (255 - b) * white;
+        }
         if (r < 0) r = 0; else if (r > 255) r = 255;
         if (g < 0) g = 0; else if (g > 255) g = 255;
         if (b < 0) b = 0; else if (b > 255) b = 255;
