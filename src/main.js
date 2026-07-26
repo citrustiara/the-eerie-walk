@@ -172,8 +172,10 @@ input.onSelectGun = () => {
 input.onFire = () => {
   if (!running) return;
   if (!gunEquipped) return;
+  if (director.holdRefusal(true)) return;
   if (director.shoot()) renderer.punch();
 };
+input.onFireRelease = () => director.holdRefusal(false);
 input.onDebugSpawn = DEBUG.enabled ? (kind) => {
   if (kind === 'hunter') { director.debugSpawn(kind); return; }
   const spawned = director.debugSpawn(kind);
@@ -204,6 +206,12 @@ director.onCaught = () => {
   // finished happening yet. Locking the state here rather than when the face
   // cuts away means escape cannot be used to get out from under it.
   if (director.fatal) beginDying();
+};
+director.onRefusal = () => {
+  hideGunHint();
+  subtitle.classList.remove('visible');
+  renderer.punch();
+  beginDying();
 };
 // ...and this is the frame the face lets go on.
 director.onDeath = (id) => showDeath(id);
@@ -246,6 +254,7 @@ function showDeath(id) {
   running = false;
   input.lockEnabled = false;
   document.exitPointerLock();
+  document.body.classList.remove('refusing');
   reticle.classList.remove('visible');
   hud.classList.remove('visible');
   stamina.classList.remove('visible');
@@ -331,6 +340,7 @@ input.onLockChange = (locked) => {
     audio.duck(AUDIO.masterVolume, 0.6);
     overlay.classList.add('hidden');
   } else {
+    director.holdRefusal(false);
     // Same overlay, different words. Pausing is not a menu you came back to on
     // purpose; it is the building waiting for you.
     setOverlay('pause', {
@@ -357,7 +367,7 @@ let loopFailures = 0;
 
 function step(dt, t) {
   // While the face is on the screen you do not get to walk away from it.
-  const frozen = director.scareT > 0;
+  const frozen = director.scareT > 0 || director.refusalDeathT > 0;
   if (!frozen) {
     const blockers = props.near(player.x, player.y, 2.5);
     player.update(dt, input, blockers);
@@ -367,6 +377,7 @@ function step(dt, t) {
     renderStamina();
   }
   const fx = director.update(dt, t);
+  document.body.classList.toggle('refusing', fx.refusal > 0);
   // The torch goes out on the way down, and nothing the director wanted to do
   // to the light matters after that.
   const fallDark = player.fallDark();
@@ -437,7 +448,7 @@ const introEnv = {
   fogDensity: FOG.density, fogColor: FOG.color, fovScale: 1,
   entities: [], meshes: [], flashlightOn: true, time: 0, dread: 0,
   hasGun: false, gunEquipped: false, scare: 0, muzzleFlash: 0, stress: 0,
-  shakeX: 0, shakeY: 0, grade: null,
+  refusal: 0, shakeX: 0, shakeY: 0, grade: null,
 };
 introEnv.meshes = props.near(player.x, player.y);
 renderer.render(player, world, introEnv);

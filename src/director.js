@@ -74,6 +74,7 @@ export class Director {
     this.onGunPickup = null;
     this.onAmmoChange = null;
     this.onCaught = null;
+    this.onRefusal = null;
     this.onLine = null;        // a line of text for the player, briefly
     this.onSprintUnlock = null;
 
@@ -102,6 +103,9 @@ export class Director {
     this.flashT = 0;           // muzzle-flash timer
     this.shake = 0;            // screen shake, decays
     this.scareT = 0;           // caught-you face timer
+    this.refusalHeld = false;  // trigger held while the view is lowered
+    this.refusalProgress = 0;  // 0..1, also drives the held-gun pose
+    this.refusalDeathT = 0;    // the short flash-to-black after it fires
     this.holes = [];           // bullet-hole decal instances
     this.shells = [];          // spent brass with a little physics
 
@@ -374,10 +378,17 @@ export class Director {
       shakeX: 0,
       shakeY: 0,
       muzzleFlash: 0,
+      refusal: 0,
       scare: 0,
       stress: 0,
       darkFlash: 0,
     };
+
+    this._updateRefusalHold(dt, fx);
+    if (this.refusalDeathT > 0) {
+      this._updateRefusalDeath(dt, fx);
+      return fx;
+    }
 
     // The caught-you sequence owns the frame while it runs.
     if (this.scareT > 0) {
@@ -1514,6 +1525,8 @@ export class Director {
     this.hunter = null;
     this.scareT = 0;
     this.scareDur = 0;
+    this.refusalHeld = false;
+    this.refusalDeathT = 0;
     this.audio.setBreath(0);
     this.audio.setHeartbeat(0);
     if (this.onDeath) this.onDeath(this.ending);
@@ -1986,6 +1999,71 @@ export class Director {
     this.audio.duck(0, 0.8);
     if (this.onDeath) this.onDeath(this.ending);
     this.onDeath = null;
+  }
+
+  // The trigger has two meanings at the very bottom of the expanded look
+  // range. A tap is ignored; holding it turns the weapon inward slowly enough
+  // to read and releasing at any point cancels the choice.
+  canRefuse() {
+    return this.hasGun && this.ammo > 0 && !this.fatal &&
+      this.scareT <= 0 && this.refusalDeathT <= 0 &&
+      !this.player.falling && !this.player.dead &&
+      this.player.pitch <= -GUN.refusalPitch;
+  }
+
+  holdRefusal(held) {
+    if (!held) {
+      this.refusalHeld = false;
+      return false;
+    }
+    if (!this.canRefuse()) return false;
+    this.refusalHeld = true;
+    return true;
+  }
+
+  _updateRefusalHold(dt, fx) {
+    if (this.refusalHeld && !this.canRefuse()) this.refusalHeld = false;
+    if (this.refusalHeld) {
+      this.refusalProgress = Math.min(1, this.refusalProgress + dt / GUN.refusalHold);
+    } else {
+      this.refusalProgress = Math.max(0, this.refusalProgress - dt * GUN.refusalRelease);
+    }
+    fx.refusal = this.refusalProgress;
+    if (this.refusalProgress >= 1) this._beginRefusal();
+  }
+
+  _beginRefusal() {
+    if (!this.canRefuse()) return false;
+    this.refusalHeld = false;
+    this.refusalProgress = 1;
+    this.refusalDeathT = GUN.refusalDeathDelay;
+    this.fatal = true;
+    this.ending = 'refusal';
+
+    this.ammo--;
+    if (this.onAmmoChange) this.onAmmoChange(this.ammo);
+    this.creature = null;
+    this.hunter = null;
+    this.hunterArrivesAt = 0;
+    this.hunterArrivalSpot = null;
+    this.audio.setBreath(0);
+    this.audio.setHeartbeat(0);
+    this.audio.playGunshot();
+    this.audio.duck(0, GUN.refusalDeathDelay);
+    this.flashT = 0.075;
+    this.shake = 1.1;
+    if (this.onRefusal) this.onRefusal();
+    return true;
+  }
+
+  _updateRefusalDeath(dt, fx) {
+    this.refusalDeathT = Math.max(0, this.refusalDeathT - dt);
+    const progress = 1 - this.refusalDeathT / GUN.refusalDeathDelay;
+    fx.refusal = 1;
+    fx.stress = 1;
+    fx.darkFlash = clamp((progress - 0.08) / 0.45, 0, 1);
+    this._updateShake(dt, fx);
+    if (this.refusalDeathT <= 0) this._die();
   }
 
   // ==========================================================================

@@ -10,6 +10,7 @@ export class Input {
     this.keys = Object.create(null);
     this.mouseDX = 0;
     this.mouseDY = 0;
+    this.fireDown = false;
     this.locked = false;
     this.onLockChange = null; // callback(locked:boolean)
     this.onToggleFlashlight = null;
@@ -17,6 +18,7 @@ export class Input {
     this.onDebugSpawn = null;
     this.onActivate = null;   // fired on the click that requests lock (gesture)
     this.onFire = null;       // left mouse, only while the pointer is locked
+    this.onFireRelease = null;
     // Clicks stop asking for the pointer once the run is over. Without this, a
     // click on the ending screen would grab the mouse and start feeding frames
     // to a corpse, and the menu underneath it would never get the event.
@@ -31,7 +33,14 @@ export class Input {
     // click must not also be read as "give me pointer lock again".
     document.addEventListener('mousedown', (e) => {
       if (!this.locked || e.button !== 0) return;
+      if (this.fireDown) return;
+      this.fireDown = true;
       if (this.onFire) this.onFire();
+    });
+    document.addEventListener('mouseup', (e) => {
+      if (e.button !== 0 || !this.fireDown) return;
+      this.fireDown = false;
+      if (this.onFireRelease) this.onFireRelease();
     });
 
     // Click anywhere to (re)acquire pointer lock. We listen at the document
@@ -87,6 +96,10 @@ export class Input {
     if (!this.locked) {
       // Drop held keys so the player doesn't keep walking while paused.
       this.keys = Object.create(null);
+      if (this.fireDown) {
+        this.fireDown = false;
+        if (this.onFireRelease) this.onFireRelease();
+      }
     }
   }
 

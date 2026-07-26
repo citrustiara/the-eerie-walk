@@ -50,6 +50,11 @@ html, body {
   opacity: 1;
 }
 
+/* Once the held gun starts turning inward, the targeting dot has no meaning. */
+body.refusing #reticle {
+  opacity: 0;
+}
+
 #gun-hint {
   position: absolute;
   left: 50%;

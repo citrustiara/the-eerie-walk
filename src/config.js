@@ -220,6 +220,10 @@ export const GUN = {
   pickupScale: 2.6,         // the world pickup is scaled up to be findable
   magazine: 12,             // total rounds. That is all you get.
   fireInterval: 0.28,       // seconds between shots
+  refusalPitch: 285,        // look this far down before a held trigger turns inward
+  refusalHold: 1.35,        // deliberate hold before the choice is committed
+  refusalRelease: 2.8,      // how quickly a cancelled hold lowers the gun again
+  refusalDeathDelay: 0.72,  // report, flash, then black before the ending card
   recoil: 1.0,              // viewmodel kick multiplier
   range: 26,                // world units
   hitRadius: 0.34,          // how forgiving the creature hitbox is
@@ -519,6 +523,14 @@ export const ENDINGS = [
     eyebrow: 'there was room beside them',
     title: 'you took your place',
     note: 'when the lights returned, one more figure was facing the plinth.',
+  },
+  {
+    id: 'refusal',
+    numeral: 'v',
+    name: 'the refusal',
+    eyebrow: 'you chose what would reach you',
+    title: 'it was still there',
+    note: 'the building continued around the place you had been.',
   },
 ];
 
