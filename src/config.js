@@ -110,17 +110,24 @@ export const PIT = {
   depth: 2.6,           // wall heights below the floor. Eight metres. Enough.
   edgeSound: 3.2,       // within this many units the draft coming up is audible
   eyesAt: 0.62,         // how far down the things that look up at you are
-  // The fall itself. Gravity is in wall-heights per second squared; one wall
-  // height is three metres, so 3.27 is real gravity and the drop takes a bit
-  // under a second and a half — long enough to know.
-  gravity: 3.27,
-  drift: 0.55,          // fraction of your walking speed you keep on the way down
-  // The frame goes black on the way down rather than at the bottom: the torch
-  // is pointed at a wall that is moving past too fast to light, and then it is
-  // not pointed at anything.
-  darkFrom: 0.18,       // eye height, on the way down, where the dark starts
-  darkTo: -0.30,        // ...and where there is nothing left to see by
-  deadFor: 1.1,         // seconds at the bottom before the screen comes up
+  // The fall itself.
+  //
+  // This used to be real gravity (3.27 wall-heights/s², one wall height being
+  // three metres) and the drop took a second and a half. Physically correct and
+  // completely wrong: a second and a half is long enough to watch yourself
+  // falling, and watching yourself fall is not the same feeling as the floor
+  // going. It is now about three times real gravity with a hard shove on the
+  // first frame, the whole drop is over in a bit under six tenths of a second,
+  // and it is fully black a fifth of the way in. Floor, nothing, bottom.
+  gravity: 9.4,
+  entryVel: 1.7,        // you are not let go of, you are dropped
+  drift: 0.28,          // fraction of your walking speed you keep on the way down
+  // The frame goes black almost at once. The torch is pointed at a wall that is
+  // already moving past too fast to light, and then it is not pointed at
+  // anything.
+  darkFrom: 0.34,       // eye height, on the way down, where the dark starts
+  darkTo: 0.02,         // ...and where there is nothing left to see by
+  deadFor: 0.35,        // seconds at the bottom before the screen comes up
 };
 
 export const LIGHT = {
@@ -228,6 +235,15 @@ export const GUN = {
 // then the thing itself, walking in from wherever it was.
 export const NOISE = {
   replyDelay: [2.6, 4.4],   // seconds between the shot and the answer
+  // ...and then a second gap between the answer and the thing itself.
+  //
+  // These used to be the same beat: the line appeared and the hunter was placed
+  // in the corridor on the same frame, which turned "it knows where you are"
+  // into a spawn notification — you read the words and then immediately looked
+  // at the thing the words were about, and there was nothing left to dread.
+  // Now the building tells you, and then makes you wait for it. The wait is
+  // where the sentence does its work.
+  arriveAfter: [4.0, 7.5],
   cooldown: 26,             // seconds before a second shot can summon again
   approachFrom: 11,         // where it comes in from, world units
   approachTo: 16,
@@ -325,6 +341,12 @@ export const LANDMARK_EVENTS = {
 // The caught-you jumpscare. `enabled` is the small creature — off, because it
 // never catches you anyway. `hunter` is the thing that comes after you fire the
 // gun, and that one absolutely does.
+//
+// The hunter's is now terminal. It used to cut away, break your torch for a few
+// seconds and put you back on your feet, which meant the worst thing in the
+// building was survivable and therefore, after the first time, an inconvenience.
+// It ends the session. That is the whole difference between a thing that is
+// chasing you and a thing that is following you around.
 export const JUMPSCARE = {
   enabled: false,
   hunter: true,
@@ -369,13 +391,30 @@ export const HUNTER = {
   despawnDistance: 40,
   hitKnockback: 1.1,
   stagger: 4,               // hits to drive it off. You have twelve rounds.
-  scareDuration: 1.6,
-  // It twitches roughly three times as often as the creature and for longer,
+  // Longer than it was, because this is now the last thing that happens to you
+  // rather than a beat you recover from. It has to outstay its welcome.
+  scareDuration: 2.2,
+  // The fits are half again as long as they were and come about twice as often,
   // and because the jitter is applied per limb the knees judder out of phase
-  // with each other. Standing still it is never once settled.
-  twitchEvery: [0.35, 1.30],
-  twitchDur: [0.14, 0.52],
-  twitchRate: 61,
+  // with each other.
+  //
+  // twitchEvery is a period between fit STARTS, not a gap between them, which
+  // is the trap here: set it below twitchDur and the fits overlap, the thing
+  // convulses without pause at every range, and a convulsion that never stops
+  // is just how the model looks. At a distance it is now in a fit around three
+  // fifths of the time and settles in between; inside about four metres the
+  // proximity term closes the period below the duration and it never settles
+  // again. The contrast is the scare — the stillness is what the fits are
+  // measured against.
+  twitchEvery: [0.42, 1.50],
+  twitchDur: [0.18, 0.74],
+  // Past the point where you can follow the individual frames. Deliberate: a
+  // judder you can count is a machine, and a judder you cannot is something
+  // wrong with the animal.
+  twitchRate: 83,
+  // How hard the head snaps off-axis during a fit. Roughly a hundred degrees —
+  // it looks at things that are not you, very fast, and then looks back.
+  snapAmount: 2.6,
 };
 
 // Horror director — randomized timers with cooldowns and slow escalation.
@@ -427,6 +466,45 @@ export const ANOMALIES = {
   blackout:  { gate: 0.38, weight: 2, dur: [3.4, 5.0] },  // the torch dies completely
   crowd:     { gate: 0.46, weight: 1, dur: [3.0, 4.5] },  // you are not alone at all
 };
+
+// How it ends.
+//
+// There is no winning. There is only the particular way the building was done
+// with you, and the point of writing them down is that after the first one you
+// know there are others — the count is visible from the first death, the shapes
+// of the ones you have not had are not.
+//
+// Order here is the order they are listed in. `id` is what goes in localStorage,
+// so do not rename one without deciding what happens to saves that have it.
+export const ENDINGS = [
+  {
+    id: 'fall',
+    numeral: 'i',
+    name: 'the drop',
+    eyebrow: 'the floor was not there',
+    title: 'you fell',
+    note: 'it does not warn you about the holes. eight metres, and nothing came to look.',
+  },
+  {
+    id: 'taken',
+    numeral: 'ii',
+    name: 'reached',
+    eyebrow: 'it stopped walking',
+    title: 'it had you',
+    note: 'you were still carrying rounds. it turned out not to matter which of you was faster.',
+  },
+  {
+    id: 'spent',
+    numeral: 'iii',
+    name: 'the twelfth',
+    eyebrow: 'the hammer fell on nothing',
+    title: 'it had you',
+    note: 'twelve was all there ever was. it kept coming after the twelfth, the way it was always going to.',
+  },
+];
+
+// Where the collected endings live between sessions.
+export const SAVE_KEY = 'the-eerie-walk/endings';
 
 // Development-only hotkeys. Flip enabled to false for a clean playtest/build.
 export const DEBUG = {

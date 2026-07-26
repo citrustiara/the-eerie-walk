@@ -87,6 +87,12 @@ export class Director {
     this.hunted = false;
     this.hunter = null;
     this.sprintGiven = false;
+    this.hunterArrivesAt = 0;  // absolute time it walks in, 0 = not on its way
+    // Set the moment it reaches you. The scare is still playing out on screen
+    // when this goes up; what it changes is what happens when the scare ends.
+    this.fatal = false;
+    this.ending = null;        // which ending id the session finished on
+    this.onDeath = null;       // fired once, after the face has finished with you
 
     // --- gun state ---------------------------------------------------------
     this.ammo = GUN.magazine;
@@ -296,7 +302,13 @@ export class Director {
       fx.ambient = LIGHT.ambient * 0.25;
       fx.beamIntensity = 0;
       fx.stress = 1;
-      if (this.scareT <= 0) this._afterCaught();
+      // A creature scare is a beat you walk away from. A hunter scare is not,
+      // and the difference is decided here rather than at the moment of contact,
+      // so the face gets its full duration either way.
+      if (this.scareT <= 0) {
+        if (this.fatal) this._die();
+        else this._afterCaught();
+      }
       return fx;
     }
 
@@ -312,6 +324,13 @@ export class Director {
     if (this.noiseReplyAt && time >= this.noiseReplyAt) {
       this.noiseReplyAt = 0;
       this._noiseReply();
+    }
+
+    // ...and some seconds after that, it is actually in the building with you.
+    // The line and the arrival are deliberately not the same event; see NOISE.
+    if (this.hunterArrivesAt && time >= this.hunterArrivesAt) {
+      this.hunterArrivesAt = 0;
+      this._spawnHunter();
     }
 
     // Anything that hunts needs a route, not a bearing. Rebuilt a few times a
@@ -1127,8 +1146,9 @@ export class Director {
       nextChargeAt: 0,      // it may run the moment it is in range
       windUntil: 0,
       chargeStart: 0,
-      twitchAt: this._rand(0.4, 1.4),
+      twitchAt: this._rand(0.15, 0.7),
       twitchUntil: -1, twitchAmp: 1, twitch: 0, snap: 0, snapTarget: 0,
+      resnapAt: 0,
     };
 
     const rel = wrapAngle(Math.atan2(spot.y - p.y, spot.x - p.x) - p.angle);
@@ -1226,19 +1246,36 @@ export class Director {
     h.yaw += wrapAngle(face - h.yaw) * Math.min(1, dt * 6);
 
     // --- twitch --------------------------------------------------------------
+    // Three things happen here that did not before, all of them aimed at the
+    // same problem: a fit that is one judder with one head-snap in it is a
+    // canned animation, and you stop reading it as involuntary the second time
+    // you see it.
+    //
+    //   * the head re-aims several times WITHIN a single fit, at a fifteenth of
+    //     a second apart, so it checks two or three places that are not you
+    //   * it snaps much further round — up to about seventy degrees off — and
+    //     the return to facing you is slow, so between fits it spends whole
+    //     seconds looking somewhere else while still walking straight at you
+    //   * the whole thing accelerates hard with proximity, to the point that
+    //     inside about four metres it is barely ever out of a fit
     if (h.t >= h.twitchAt) {
       h.twitchUntil = h.t + this._rand(HUNTER.twitchDur[0], HUNTER.twitchDur[1]);
-      h.twitchAmp = this._rand(0.6, 1);
-      h.snapTarget = (this.rng() - 0.5) * 1.9;
+      h.twitchAmp = this._rand(0.75, 1);
+      h.snapTarget = (this.rng() - 0.5) * HUNTER.snapAmount;
+      h.resnapAt = h.t + this._rand(0.05, 0.14);
       h.twitchAt = h.t + this._rand(HUNTER.twitchEvery[0], HUNTER.twitchEvery[1]) /
-        (1 + clamp(1 - dist / 10, 0, 1) * 1.4);
+        (1 + clamp(1 - dist / 12, 0, 1) * 2.6);
     }
     if (h.t < h.twitchUntil) {
       h.twitch = h.twitchAmp;
-      h.snap += (h.snapTarget - h.snap) * Math.min(1, dt * 30);
+      if (h.t >= h.resnapAt) {
+        h.snapTarget = (this.rng() - 0.5) * HUNTER.snapAmount;
+        h.resnapAt = h.t + this._rand(0.05, 0.16);
+      }
+      h.snap += (h.snapTarget - h.snap) * Math.min(1, dt * 48);
     } else {
-      h.twitch = Math.max(0, h.twitch - dt * 8);
-      h.snap += (0 - h.snap) * Math.min(1, dt * 2.6);
+      h.twitch = Math.max(0, h.twitch - dt * 6);
+      h.snap += (0 - h.snap) * Math.min(1, dt * 1.5);
     }
 
     // --- animate + audio -----------------------------------------------------
@@ -1301,15 +1338,38 @@ export class Director {
     });
   }
 
+  // It reached you. This is the end of the run — see JUMPSCARE.
+  //
+  // Which ending you get depends on the state of the magazine, because the
+  // difference between being caught with rounds left and being caught having
+  // fired all twelve is the only decision the second half of a session is
+  // actually about.
   _huntCaught() {
+    if (this.fatal) return;          // it cannot catch you twice
     this.hunter = null;
+    this.hunterArrivesAt = 0;
     this.audio.setBreath(0);
     this.audio.setHeartbeat(0);
     this.audio.playJumpscare();
     this.shake = 1;
     this.scareT = HUNTER.scareDuration;
     this.scareDur = HUNTER.scareDuration;
+    this.fatal = true;
+    this.ending = this.ammo > 0 ? 'taken' : 'spent';
     if (this.onCaught) this.onCaught();
+  }
+
+  // The face has finished. Nothing gets rebuilt, nothing gets rescheduled — the
+  // director is done, and main.js takes it from here.
+  _die() {
+    this.creature = null;
+    this.hunter = null;
+    this.scareT = 0;
+    this.scareDur = 0;
+    this.audio.setBreath(0);
+    this.audio.setHeartbeat(0);
+    if (this.onDeath) this.onDeath(this.ending);
+    this.onDeath = null;
   }
 
   _despawnHunter() {
@@ -1670,10 +1730,19 @@ export class Director {
     this.audio.setHeartbeat(0.75);
 
     // And then it starts walking. Once the hunt is on, it walks in where you
-    // can see it instead.
+    // can see it instead — but not yet. The line you have just read is the
+    // building telling you something is on its way; if the thing appears in the
+    // same breath, the line was a label on it rather than a warning about it.
+    // Four to seven seconds of corridor go past first, and the only thing
+    // filling them is a set of footsteps you cannot place.
     if (this.hunted) {
-      if (!this.hunter) this._spawnHunter();
-      else this.hunter.nextChargeAt = Math.min(this.hunter.nextChargeAt, this.hunter.t + 1.5);
+      if (!this.hunter) {
+        if (!this.hunterArrivesAt) {
+          this.hunterArrivesAt = this.now + this._rand(NOISE.arriveAfter[0], NOISE.arriveAfter[1]);
+        }
+      } else {
+        this.hunter.nextChargeAt = Math.min(this.hunter.nextChargeAt, this.hunter.t + 1.5);
+      }
       this.next.phantomSteps = Math.min(this.next.phantomSteps || Infinity, this.now + 1.6);
       return;
     }

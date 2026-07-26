@@ -17,6 +17,10 @@ export class Input {
     this.onDebugSpawn = null;
     this.onActivate = null;   // fired on the click that requests lock (gesture)
     this.onFire = null;       // left mouse, only while the pointer is locked
+    // Clicks stop asking for the pointer once the run is over. Without this, a
+    // click on the ending screen would grab the mouse and start feeding frames
+    // to a corpse, and the menu underneath it would never get the event.
+    this.lockEnabled = true;
 
     window.addEventListener('keydown', (e) => this._onKey(e, true));
     window.addEventListener('keyup', (e) => this._onKey(e, false));
@@ -35,7 +39,7 @@ export class Input {
     // canvas-only listener would never see the click. This is also the user
     // gesture we use to start the AudioContext.
     document.addEventListener('click', () => {
-      if (this.locked) return;
+      if (this.locked || !this.lockEnabled) return;
       if (this.onActivate) this.onActivate();
       const p = canvas.requestPointerLock();
       if (p && typeof p.catch === 'function') p.catch(() => {}); // ignore rejects

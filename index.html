@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
-  <title>The Backrooms</title>
+  <title>the eerie walk</title>
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
@@ -30,14 +30,18 @@
       </div>
     </div>
 
-    <!-- Start / pause overlay -->
-    <div id="overlay">
+    <!-- One overlay, four states: start, pause, an ending, and the list of
+         endings. main.js swaps the mode class and rewrites the three lines.
+
+         The title screen used to explain itself — a level number, the word
+         backrooms, and a paragraph about the flashlight and the twelve rounds
+         and the floor. All of it was answering questions nobody had asked yet.
+         What is left is the name, the keys, and a door. -->
+    <div id="overlay" class="mode-start">
       <div id="overlay-inner">
-        <p id="overlay-eyebrow">level 0</p>
-        <h1 id="overlay-title">the backrooms</h1>
-        <p id="overlay-note">use headphones. the flashlight is the only thing keeping
-          the dark out, there are twelve rounds in the whole building, and the floor
-          is not everywhere.</p>
+        <p id="overlay-eyebrow"></p>
+        <h1 id="overlay-title">the eerie walk</h1>
+        <p id="overlay-note">use headphones.</p>
 
         <dl id="controls">
           <div class="ctl"><dt><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd></dt><dd>move</dd></div>
@@ -47,6 +51,13 @@
           <div class="ctl"><dt><kbd class="wide">click</kbd></dt><dd>fire</dd></div>
           <div class="ctl"><dt><kbd class="wide">esc</kbd></dt><dd>pause</dd></div>
         </dl>
+
+        <!-- The collection. Rows you have not reached are dotted out at the
+             length of the name they are hiding, so the shape of what is
+             missing is visible and nothing else is. -->
+        <div id="endings">
+          <ol id="endings-list"></ol>
+        </div>
 
         <p id="overlay-action">click to enter</p>
       </div>

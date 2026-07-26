@@ -258,9 +258,29 @@ body.caught #stage::after {
   margin: 0 auto;
 }
 
+/* --- what each overlay mode shows -----------------------------------------
+   Everything optional is hidden in its own base rule below and switched on
+   here, so a state can never inherit a leftover block from the state before
+   it. Two ids and a class beats the one id of the base rule, which is why
+   these can sit above the rules they are overriding. */
+/* The keys are on the way in and on the way back from a pause. They are not on
+   an ending screen — you already know the controls, and none of them were the
+   problem. */
+#overlay.mode-start   #controls { display: grid; }
+#overlay.mode-pause   #controls { display: grid; }
+#overlay.mode-endings #endings  { display: block; }
+
+/* The control table carried the space above the action line, so the modes
+   without it need that space put back by hand. */
+#overlay.mode-dead    #overlay-action { margin-top: 2.4rem; }
+#overlay.mode-endings #overlay-action { margin-top: 1.8rem; }
+
+/* An empty eyebrow or note must not leave a gap where a line would have been. */
+#overlay-eyebrow:empty, #overlay-note:empty { display: none; }
+
 /* --- the control table --- */
 #controls {
-  display: grid;
+  display: none;            /* the start screen turns it on; nothing else does */
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 0.55rem 2rem;
   margin: 1.8rem auto 1.6rem;
@@ -327,31 +347,89 @@ kbd.wide { min-width: auto; letter-spacing: 0.1em; }
   50%      { opacity: 1; }
 }
 
-/* --- the death screen ------------------------------------------------------
+/* --- an ending -------------------------------------------------------------
    The same overlay, with everything warm taken out of it and the control table
    hidden — you already know the controls, and none of them were the problem.
-   It fades up out of black over a second and a half rather than appearing,
-   because it arrives while the screen is already black and the transition is
-   the only thing telling you the game is over rather than loading. */
-#overlay.dead {
+   It fades up out of black rather than appearing, because it arrives while the
+   screen is already black and the transition is the only thing telling you the
+   run is over rather than loading.
+
+   Faster than it was (1.6s -> 0.9s). The pit is now a six-tenths-of-a-second
+   drop and a third of a second of lying at the bottom, and a leisurely fade
+   after that put the slow part back in the wrong place. */
+#overlay.mode-dead,
+#overlay.mode-endings {
   background: radial-gradient(ellipse at center, rgba(4,3,3,0.94) 0%, rgba(0,0,0,1) 100%);
   backdrop-filter: none;
-  animation: death-in 1.6s ease-out both;
 }
 
-/* The control table carried the space above the action line, so hiding it needs
-   that space put back by hand. */
-#overlay.dead #controls { display: none; }
-#overlay.dead #overlay-action { margin-top: 2.4rem; }
+#overlay.mode-dead { animation: death-in 0.9s ease-out both; }
 
-#overlay.dead #overlay-eyebrow { color: rgba(126, 62, 52, 0.8); }
-#overlay.dead #overlay-title   { color: #b8ada4; }
+#overlay.mode-dead #overlay-eyebrow,
+#overlay.mode-endings #overlay-eyebrow { color: rgba(126, 62, 52, 0.8); }
+#overlay.mode-dead #overlay-title,
+#overlay.mode-endings #overlay-title   { color: #b8ada4; }
 
 @keyframes death-in {
   0%   { opacity: 0; }
-  35%  { opacity: 0; }
+  45%  { opacity: 0; }
   100% { opacity: 1; }
 }
+
+/* --- the collection --------------------------------------------------------
+   One row per ending. A row you have reached is its numeral and its name; a row
+   you have not is its numeral and a run of dots exactly as long as the name it
+   is standing in for — enough to know something is there and how big it is, and
+   nothing else. The one you have just had is marked, and only until you reload. */
+#endings {
+  display: none;            /* only the list screen turns it on */
+  margin: 1.7rem auto 0;
+  padding: 1.3rem 0 0;
+  border-top: 1px solid rgba(236, 232, 220, 0.10);
+  max-width: 20rem;
+}
+
+#endings-list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+  text-align: left;
+}
+
+.ending {
+  display: flex;
+  align-items: baseline;
+  gap: 0.9rem;
+}
+
+.ending-num {
+  flex: none;
+  width: 1.6rem;
+  font-size: 0.58rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: rgba(150, 138, 96, 0.5);
+}
+
+.ending-name {
+  font-size: 0.82rem;
+  letter-spacing: 0.16em;
+  text-transform: lowercase;
+  color: rgba(214, 208, 194, 0.88);
+}
+
+/* Not reached. The dots sit low and dim so the row reads as a gap in a list
+   rather than as an item in it. */
+.ending:not(.found) .ending-num { color: rgba(150, 138, 96, 0.22); }
+.ending:not(.found) .ending-name {
+  color: rgba(160, 156, 146, 0.30);
+  letter-spacing: 0.34em;
+}
+
+/* The one that just happened to you. */
+.ending.latest .ending-name { color: #d8cfc0; }
+.ending.latest .ending-num  { color: rgba(178, 66, 56, 0.95); }
 
 @media (max-width: 560px) {
   #controls { grid-template-columns: 1fr; gap: 0.5rem; }

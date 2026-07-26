@@ -107,7 +107,10 @@ export class Player {
 
   _startFall() {
     this.falling = true;
-    this.fallVel = 0;
+    // Not from rest. Starting at zero meant the first tenth of a second of a
+    // fall looked exactly like standing still, and the floor giving way has to
+    // register on the frame it happens on, not two frames later.
+    this.fallVel = PIT.entryVel;
     this.sprinting = false;
     // You keep some of the speed you walked in with, so you go over the edge at
     // an angle instead of dropping down it like a lift.
@@ -132,10 +135,12 @@ export class Player {
     if (!this.world.isWall(Math.floor(this.x), Math.floor(ny))) this.y = ny;
     else this.fallDY = 0;
 
-    // The view tips forward over the edge and keeps going.
-    this.pitch = Math.max(-PLAYER.maxPitch, this.pitch - PLAYER.maxPitch * 1.7 * dt);
-    this.bobOffset *= 0.88;
-    this.bobRoll *= 0.88;
+    // The view tips forward over the edge and keeps going. Fast enough to be
+    // all the way down inside the first third of a drop that is now only six
+    // tenths of a second long.
+    this.pitch = Math.max(-PLAYER.maxPitch, this.pitch - PLAYER.maxPitch * 5.5 * dt);
+    this.bobOffset *= 0.72;
+    this.bobRoll *= 0.72;
 
     if (this.eyeZ <= -PIT.depth) {
       this.eyeZ = -PIT.depth;

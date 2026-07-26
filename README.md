@@ -1,4 +1,4 @@
-# The Backrooms
+# The Eerie Walk
 
 A browser raycaster horror game. No engine, no libraries — a software DDA
 renderer drawing textured walls, cast floor/ceiling, articulated solid meshes
@@ -13,13 +13,19 @@ at six stages of coming apart. Everything that makes one place different from
 another is its *shape*: how tight it is, how far you can see, whether the ceiling
 is at two and a half metres or seven or simply absent with windows glowing three
 storeys up, and whether the floor is all there. It is often not, and walking into
-a hole is the only thing in the game that kills you.
+a hole is one of the two ways this ends.
 
 Before you fire the gun there are no jumpscares and nothing runs at you. The
 creature walks, and walking is enough; it reaches you and then it simply is not
 there, and you have to decide whether it ever was.
 
-Then you fire the gun, and something else comes.
+Then you fire the gun, and something else comes. That one does not vanish, does
+not lose interest, and when it reaches you the run is over.
+
+There is no winning — only which ending you got. They are collected: the count
+is visible from the first death, the shapes of the ones you have not had are
+not. The list lives in `ENDINGS` in `src/config.js` and persists in
+localStorage under `SAVE_KEY`.
 
 The whole point is the dark: ambient light is almost nothing, so the handheld
 flashlight beam plus thick exponential fog are the only way to see. Dread is

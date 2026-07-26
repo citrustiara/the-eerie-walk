@@ -265,36 +265,43 @@ export class AudioEngine {
 
   // Going down one. Air past your ears: broadband noise opening up and rising
   // as it goes, with the reverb wound right up because the shaft is the only
-  // genuinely large space in the building. Two and a half seconds is longer
-  // than the fall, which is fine — the impact cuts it off.
+  // genuinely large space in the building.
+  //
+  // This was authored against a fall that took a second and a half, and it
+  // faded *in* over a third of a second — so the loudest part of the sound of
+  // falling arrived after you had already landed. The drop is now under six
+  // tenths of a second and this is shaped to it: full volume in three
+  // hundredths, the whole sweep done in half a second, and the impact cutting
+  // off whatever is left.
   playFallRush() {
     if (!this.started) return;
     const ctx = this.ctx, t = ctx.currentTime;
     const src = ctx.createBufferSource(); src.buffer = this._longNoise; src.loop = true;
     src.playbackRate.value = 0.7;
     const bp = ctx.createBiquadFilter(); bp.type = 'bandpass'; bp.Q.value = 0.7;
-    bp.frequency.setValueAtTime(180, t);
-    bp.frequency.exponentialRampToValueAtTime(1150, t + 1.5);
+    bp.frequency.setValueAtTime(240, t);
+    bp.frequency.exponentialRampToValueAtTime(1400, t + 0.5);
     const g = ctx.createGain(); g.gain.value = 0;
     src.connect(bp).connect(g).connect(this.master);
     const send = ctx.createGain(); send.gain.value = 0.85;
     g.connect(send).connect(this.reverb);
     g.gain.setValueAtTime(0.0001, t);
-    g.gain.linearRampToValueAtTime(0.34, t + 0.35);
-    g.gain.linearRampToValueAtTime(0.52, t + 1.4);
-    g.gain.linearRampToValueAtTime(0.0001, t + 2.5);
-    src.start(t); src.stop(t + 2.6);
-    // ...and one long note underneath it, going down with you.
+    g.gain.linearRampToValueAtTime(0.46, t + 0.03);
+    g.gain.linearRampToValueAtTime(0.60, t + 0.5);
+    g.gain.linearRampToValueAtTime(0.0001, t + 0.95);
+    src.start(t); src.stop(t + 1.0);
+    // ...and one note underneath it, going down with you and getting there
+    // first. The lurch in the stomach is this, not the noise.
     const o = ctx.createOscillator(); o.type = 'sawtooth';
-    o.frequency.setValueAtTime(160, t);
-    o.frequency.exponentialRampToValueAtTime(34, t + 1.6);
+    o.frequency.setValueAtTime(210, t);
+    o.frequency.exponentialRampToValueAtTime(30, t + 0.55);
     const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 420;
     const og = ctx.createGain(); og.gain.value = 0;
     o.connect(lp).connect(og).connect(this.master);
     og.gain.setValueAtTime(0.0001, t);
-    og.gain.linearRampToValueAtTime(0.10, t + 0.5);
-    og.gain.linearRampToValueAtTime(0.0001, t + 1.9);
-    o.start(t); o.stop(t + 2.0);
+    og.gain.linearRampToValueAtTime(0.16, t + 0.02);
+    og.gain.linearRampToValueAtTime(0.0001, t + 0.7);
+    o.start(t); o.stop(t + 0.75);
   }
 
   // The bottom. One very short, very loud crack of noise over a body-thump, and
@@ -614,12 +621,54 @@ export class AudioEngine {
     o.start(t + 0.30); o.stop(t + 1.2);
   }
 
-  // It has you. One hit, everything at once, and then the room is gone.
+  // A hard-clipping curve. Everything pushed through this comes out square and
+  // ugly at anything above a whisper, which is the point: a scream that has
+  // gone past what the medium can carry reads as *loud* even at a sane output
+  // level, because distortion is the cue your ears actually use for loudness.
+  _clipCurve(drive = 40) {
+    if (this._clip && this._clipDrive === drive) return this._clip;
+    const n = 1024, curve = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
+      const x = (i / (n - 1)) * 2 - 1;
+      curve[i] = Math.tanh(x * drive);
+    }
+    this._clip = curve;
+    this._clipDrive = drive;
+    return curve;
+  }
+
+  // It has you, and that is the end of the session.
+  //
+  // The old version was a crack, a sub and a formant-filtered roar — correct in
+  // its parts and far too well-behaved as a whole. Everything decayed politely
+  // into the reverb, nothing clipped, and the loudest moment was about as loud
+  // as a gunshot, which you had already heard twelve times. Since this is now
+  // the last sound in a run it is allowed to be the worst one:
+  //
+  //   * the whole mix is ducked to nothing for forty milliseconds FIRST, so the
+  //     hit lands in a hole in the sound rather than on top of the room tone.
+  //     That silence is doing more work than any of the layers after it.
+  //   * a screech: three high formants swept downward through a hard clipper,
+  //     which is as close to a voice as this game gets. Not a pitched shriek —
+  //     there is still nothing tonal anywhere in the building — but bands of
+  //     noise narrow enough to have a throat behind them.
+  //   * the sub arrives a frame late and lands under all of it.
+  //   * and then four seconds of a room that has had everything taken out of
+  //     the top of it, over the death screen.
   playJumpscare() {
     if (!this.started) return;
     const ctx = this.ctx, t = ctx.currentTime;
+
+    // The hole. Forty milliseconds of nothing, and then everything.
+    const HIT = t + 0.045;
+    this.master.gain.cancelScheduledValues(t);
+    this.master.gain.setValueAtTime(this.master.gain.value, t);
+    this.master.gain.linearRampToValueAtTime(0.0001, t + 0.02);
+    this.master.gain.setValueAtTime(0.0001, HIT - 0.004);
+    this.master.gain.linearRampToValueAtTime(AUDIO.masterVolume, HIT);
+
     this._thump(1.0, 54);
-    this._thump(0.8, 88);
+    this._thump(0.85, 88);
 
     // The transient: full-band, instant, brutal.
     const crack = ctx.createBufferSource(); crack.buffer = this._noise;
@@ -627,40 +676,75 @@ export class AudioEngine {
     const cg = ctx.createGain(); cg.gain.value = 0;
     crack.connect(cg).connect(this.master);
     const cs = ctx.createGain(); cs.gain.value = 0.9; cg.connect(cs).connect(this.reverb);
-    cg.gain.setValueAtTime(0.0001, t);
-    cg.gain.exponentialRampToValueAtTime(0.9, t + 0.004);
-    cg.gain.exponentialRampToValueAtTime(0.0001, t + 0.55);
-    crack.start(t); crack.stop(t + 0.7);
+    cg.gain.setValueAtTime(0.0001, HIT);
+    cg.gain.exponentialRampToValueAtTime(0.95, HIT + 0.003);
+    cg.gain.exponentialRampToValueAtTime(0.0001, HIT + 0.55);
+    crack.start(HIT); crack.stop(HIT + 0.7);
 
     // Under it, a sub that keeps falling after the picture has already cut.
     const o = ctx.createOscillator(); o.type = 'sine';
-    o.frequency.setValueAtTime(120, t);
-    o.frequency.exponentialRampToValueAtTime(19, t + 1.5);
+    o.frequency.setValueAtTime(130, HIT);
+    o.frequency.exponentialRampToValueAtTime(18, HIT + 1.9);
     const og = ctx.createGain(); og.gain.value = 0;
     o.connect(og).connect(this.master);
-    og.gain.setValueAtTime(0.0001, t);
-    og.gain.linearRampToValueAtTime(0.95, t + 0.01);
-    og.gain.exponentialRampToValueAtTime(0.0001, t + 1.7);
-    o.start(t); o.stop(t + 1.8);
+    og.gain.setValueAtTime(0.0001, HIT);
+    og.gain.linearRampToValueAtTime(1.0, HIT + 0.012);
+    og.gain.exponentialRampToValueAtTime(0.0001, HIT + 2.1);
+    o.start(HIT); o.stop(HIT + 2.2);
 
-    // Its voice, if that is the word: a formant-filtered roar that decays into
-    // the reverb rather than ending.
+    // The screech. Narrow bands of noise through a hard clipper, swept down and
+    // wobbling against each other so the three never agree on a pitch — the
+    // sound of something with a throat that is not shaped like a throat.
+    const shaper = ctx.createWaveShaper();
+    shaper.curve = this._clipCurve(34);
+    shaper.oversample = '4x';
+    const sg = ctx.createGain(); sg.gain.value = 0.55;
+    shaper.connect(sg).connect(this.master);
+    const ss = ctx.createGain(); ss.gain.value = 0.75; sg.connect(ss).connect(this.reverb);
+
+    for (const [f0, f1, q, amp, wob] of [
+      [2600, 780, 13, 0.60, 17],
+      [1750, 430, 16, 0.48, 23],
+      [3900, 1250, 11, 0.34, 31],
+    ]) {
+      const src = ctx.createBufferSource(); src.buffer = this._longNoise; src.loop = true;
+      src.playbackRate.value = 1.3;
+      const bp = ctx.createBiquadFilter(); bp.type = 'bandpass'; bp.Q.value = q;
+      bp.frequency.setValueAtTime(f0, HIT);
+      bp.frequency.exponentialRampToValueAtTime(f1, HIT + 1.15);
+      // A fast tremble on the formant. Nothing that screams holds still.
+      const lfo = ctx.createOscillator(); lfo.type = 'triangle';
+      lfo.frequency.value = wob;
+      const lg = ctx.createGain(); lg.gain.value = f0 * 0.10;
+      lfo.connect(lg).connect(bp.frequency);
+      const g = ctx.createGain(); g.gain.value = 0;
+      src.connect(bp).connect(g).connect(shaper);
+      g.gain.setValueAtTime(0.0001, HIT);
+      g.gain.linearRampToValueAtTime(amp, HIT + 0.018);
+      g.gain.setValueAtTime(amp, HIT + 0.42);
+      g.gain.exponentialRampToValueAtTime(0.0001, HIT + 1.5);
+      src.start(HIT); src.stop(HIT + 1.7);
+      lfo.start(HIT); lfo.stop(HIT + 1.7);
+    }
+
+    // Its body, underneath the voice: the old roar, still doing the job of
+    // making the whole thing sound big rather than sharp.
     for (const [f, q, amp] of [[220, 9, 0.5], [640, 7, 0.34], [1420, 6, 0.2]]) {
       const src = ctx.createBufferSource(); src.buffer = this._longNoise; src.loop = true;
       src.playbackRate.value = 0.7;
       const bp = ctx.createBiquadFilter(); bp.type = 'bandpass';
-      bp.frequency.setValueAtTime(f * 1.5, t);
-      bp.frequency.exponentialRampToValueAtTime(f * 0.55, t + 1.1);
+      bp.frequency.setValueAtTime(f * 1.5, HIT);
+      bp.frequency.exponentialRampToValueAtTime(f * 0.55, HIT + 1.1);
       bp.Q.value = q;
       const g = ctx.createGain(); g.gain.value = 0;
       src.connect(bp).connect(g).connect(this.master);
       const s = ctx.createGain(); s.gain.value = 0.8; g.connect(s).connect(this.reverb);
-      g.gain.setValueAtTime(0.0001, t);
-      g.gain.linearRampToValueAtTime(amp, t + 0.05);
-      g.gain.exponentialRampToValueAtTime(0.0001, t + 1.3);
-      src.start(t); src.stop(t + 1.5);
+      g.gain.setValueAtTime(0.0001, HIT);
+      g.gain.linearRampToValueAtTime(amp, HIT + 0.05);
+      g.gain.exponentialRampToValueAtTime(0.0001, HIT + 1.4);
+      src.start(HIT); src.stop(HIT + 1.6);
     }
-    this.muffleFor(300, 4.0);
+    this.muffleFor(260, 5.0);
   }
 
   // Hurt, not killed. A short, wet grunt with a bone crack on top.
