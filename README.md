@@ -644,7 +644,8 @@ you and it.
     answer or hurry a hunter that is already present
   - *breathing* — the corridor inhales; the FOV swells and contracts
   - *swarm* — a dozen pairs of eyes open around you at once
-  - *redshift* — the place turns arterial and your pulse comes up
+  - *redshift* — the place turns arterial shortly before a hunter arrives or
+    charges, or before a landmark ritual fires; it is never selected randomly
   - *blackout* — the torch simply stops, and the creature reliably arrives
     while it is off
   - *crowd* — the ceiling lights come up, the corridor is full, then dark again

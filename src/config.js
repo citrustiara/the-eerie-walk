@@ -471,7 +471,10 @@ export const ANOMALIES = {
   silence:   { gate: 0.10, weight: 3, dur: [4.0, 6.5] },
   breathing: { gate: 0.14, weight: 3, dur: [5.0, 8.0] },  // the walls inhale
   swarm:     { gate: 0.22, weight: 2, dur: [4.0, 6.0] },  // eyes open all around you
-  redshift:  { gate: 0.30, weight: 2, dur: [5.0, 8.0] },  // the place turns arterial
+  // Redshift is never drawn from the random anomaly bag. The director starts it
+  // shortly before an arrival, charge, or landmark ritual, so the colour
+  // becomes a warning the player can learn instead of an unrelated filter.
+  redshift:  { gate: 0.30, weight: 0, dur: [4.4, 5.2], lead: 2.4, chargeLead: 1.8 },
   blackout:  { gate: 0.38, weight: 2, dur: [3.4, 5.0] },  // the torch dies completely
   crowd:     { gate: 0.46, weight: 1, dur: [3.0, 4.5] },  // you are not alone at all
 };

@@ -88,6 +88,8 @@ export class Director {
     this.hunter = null;
     this.sprintGiven = false;
     this.hunterArrivesAt = 0;  // absolute time it walks in, 0 = not on its way
+    this.hunterArrivalSpot = null; // reserved early so omens can point truthfully
+    this.redshiftedArrivalAt = 0;
     // Set the moment it reaches you. The scare is still playing out on screen
     // when this goes up; what it changes is what happens when the scare ends.
     this.fatal = false;
@@ -400,18 +402,23 @@ export class Director {
       return fx;
     }
 
+    // Something heard the last shot, and it has finished deciding.
+    if (this.noiseReplyAt && time >= this.noiseReplyAt) {
+      this.noiseReplyAt = 0;
+      this._noiseReply();
+    }
+
+    // Red is a sentence now: an arrival or an authored room event is about to
+    // happen. Give those omens first refusal before the random event scheduler
+    // can occupy the anomaly slot for the same few seconds.
+    this._updateOmenWatch();
+
     // --- try to launch new events ------------------------------------------
     for (const key in HORROR.events) {
       if (time >= this.next[key] && this.dread >= (this.gate[key] || 0)) {
         this._trigger(key, time);
         this._schedule(key, time);
       }
-    }
-
-    // Something heard the last shot, and it has finished deciding.
-    if (this.noiseReplyAt && time >= this.noiseReplyAt) {
-      this.noiseReplyAt = 0;
-      this._noiseReply();
     }
 
     // ...and some seconds after that, it is actually in the building with you.
@@ -1242,9 +1249,13 @@ export class Director {
   // at it does not slow it down.
   _spawnHunter() {
     if (this.hunter) return false;
-    const spot = this._placeInSight(HUNTER.spawnMin, HUNTER.spawnMax)
-      || this._placeOutOfSight(HUNTER.spawnMin, HUNTER.spawnMax);
+    const reserved = this.hunterArrivalSpot;
+    const spot = (reserved && this._openAt(reserved.x, reserved.y) ? reserved : null)
+      || this._placeInSight(HUNTER.spawnMin, HUNTER.spawnMax)
+      || this._placeOutOfSight(HUNTER.spawnMin, HUNTER.spawnMax)
+      || this._placeReachable(HUNTER.spawnMin, HUNTER.spawnMax);
     if (!spot) return false;
+    this.hunterArrivalSpot = null;
 
     const p = this.player;
     this.hunter = {
@@ -1261,6 +1272,7 @@ export class Director {
       speed: HUNTER.approachSpeed,
       lastStepPhase: 0,
       nextChargeAt: 0,      // it may run the moment it is in range
+      chargeOmenAt: 0,
       windUntil: 0,
       chargeStart: 0,
       twitchAt: this._rand(0.15, 0.7),
@@ -1322,12 +1334,22 @@ export class Director {
       h.speed = HUNTER.paceSpeed * (1 + clamp((dist - HUNTER.catchUpFrom) / 12, 0, HUNTER.catchUpMax));
       h.reach += (0.25 - h.reach) * dt * 2;
       h.mouth += (0.45 - h.mouth) * dt * 2;
-      if (dist <= HUNTER.chargeFrom && h.t >= h.nextChargeAt &&
-          !this._fogConceals() && this._hasLineOfSight(h.x, h.y)) {
-        h.mode = 'wind';
-        h.windUntil = h.t + HUNTER.chargeWindUp;
-        if (!this._isSilent()) this.audio.playHunterCharge(0.8);
-        this.shake = 0.35;
+      const canCharge = dist <= HUNTER.chargeFrom && !this._fogConceals() &&
+        this._hasLineOfSight(h.x, h.y);
+      if (h.chargeOmenAt && h.t >= h.chargeOmenAt) {
+        h.chargeOmenAt = 0;
+        if (canCharge) this._beginHunterWind(h);
+        else h.nextChargeAt = h.t + 1.0; // the warning gave the player room
+      } else if (!h.chargeOmenAt && canCharge && h.t >= h.nextChargeAt) {
+        // When the anomaly slot is free, redshift buys a short, readable warning
+        // before the wind-up. If another anomaly is already doing work, retain
+        // the old immediate wind-up rather than letting the hunter stall.
+        if (this._startAnomaly('redshift', 'charge')) {
+          h.chargeOmenAt = h.t + ANOMALIES.redshift.chargeLead;
+          h.nextChargeAt = h.chargeOmenAt;
+        } else {
+          this._beginHunterWind(h);
+        }
       }
     } else if (h.mode === 'wind') {
       // It stops dead. Half a second of nothing, and then it is on you.
@@ -1456,6 +1478,13 @@ export class Director {
     });
   }
 
+  _beginHunterWind(h) {
+    h.mode = 'wind';
+    h.windUntil = h.t + HUNTER.chargeWindUp;
+    if (!this._isSilent()) this.audio.playHunterCharge(0.8);
+    this.shake = 0.35;
+  }
+
   // It reached you. This is the end of the run — see JUMPSCARE.
   //
   // Which ending you get depends on the state of the magazine, because the
@@ -1466,6 +1495,7 @@ export class Director {
     if (this.fatal) return;          // it cannot catch you twice
     this.hunter = null;
     this.hunterArrivesAt = 0;
+    this.hunterArrivalSpot = null;
     this.audio.setBreath(0);
     this.audio.setHeartbeat(0);
     this.audio.playJumpscare();
@@ -1545,21 +1575,28 @@ export class Director {
   // Anomalies
   // ==========================================================================
 
-  _startAnomaly() {
-    if (this.anomaly) return;
+  _startAnomaly(forcedType = null, omen = null) {
+    if (this.anomaly) return false;
     // Weighted pick among the ones dread has unlocked.
-    const eligible = ANOMALY_KEYS.filter((k) => this.dread >= ANOMALIES[k].gate);
-    if (!eligible.length) return;
+    // Redshift is deliberately absent: it is started by _updateOmenWatch or by
+    // the hunter charge decision, never by a timer that has nothing to predict.
+    const eligible = forcedType ? [forcedType] :
+      ANOMALY_KEYS.filter((k) => k !== 'redshift' &&
+        this.dread >= ANOMALIES[k].gate && ANOMALIES[k].weight > 0);
+    if (!eligible.length) return false;
     let total = 0;
     for (const k of eligible) total += ANOMALIES[k].weight;
-    let roll = this.rng() * total, type = eligible[0];
-    for (const k of eligible) {
-      roll -= ANOMALIES[k].weight;
-      if (roll <= 0) { type = k; break; }
+    let type = forcedType || eligible[0];
+    if (!forcedType) {
+      let roll = this.rng() * total;
+      for (const k of eligible) {
+        roll -= ANOMALIES[k].weight;
+        if (roll <= 0) { type = k; break; }
+      }
     }
 
     const cfg = ANOMALIES[type];
-    const a = { type, t: 0, dur: this._rand(cfg.dur[0], cfg.dur[1]) };
+    const a = { type, omen, t: 0, dur: this._rand(cfg.dur[0], cfg.dur[1]) };
     this.anomaly = a;
 
     switch (type) {
@@ -1633,6 +1670,28 @@ export class Director {
       }
     }
     this.dread = Math.min(HORROR.dreadMax, this.dread + 0.02);
+    return true;
+  }
+
+  _updateOmenWatch() {
+    if (this.anomaly) return;
+    const lead = ANOMALIES.redshift.lead;
+
+    if (this.hunterArrivesAt &&
+        this.hunterArrivesAt - this.now <= lead &&
+        this.redshiftedArrivalAt !== this.hunterArrivesAt) {
+      if (this._startAnomaly('redshift', 'arrival')) {
+        this.redshiftedArrivalAt = this.hunterArrivesAt;
+      }
+      return;
+    }
+
+    const pending = this.pendingRitual;
+    if (pending && !pending.redshifted &&
+        pending.at - this.elapsed <= lead &&
+        this.dread >= ANOMALIES.redshift.gate) {
+      if (this._startAnomaly('redshift', 'ritual')) pending.redshifted = true;
+    }
   }
 
   _updateAnomaly(dt, fx) {
@@ -1868,6 +1927,13 @@ export class Director {
     if (this.hunted) {
       if (!this.hunter) {
         if (!this.hunterArrivesAt) {
+          // Reserve the direction before the wait begins. Swarm and redshift can
+          // now tell the truth about where the arrival will happen, and the
+          // hunter uses the same point when the timer expires.
+          this.hunterArrivalSpot =
+            this._placeInSight(NOISE.approachFrom, NOISE.approachTo) ||
+            this._placeOutOfSight(NOISE.approachFrom, NOISE.approachTo) ||
+            this._placeReachable(NOISE.approachFrom, NOISE.approachTo);
           this.hunterArrivesAt = this.now + this._rand(NOISE.arriveAfter[0], NOISE.arriveAfter[1]);
         }
       } else {
