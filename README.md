@@ -637,12 +637,16 @@ you and it.
 - **Distant sounds** — a door slamming, a radio finding a station, a child.
 - **Whispers** drift past, panned, on randomised timers.
 - **Anomalies**, gated so the session escalates:
-  - *fog* — the air thickens and warms
-  - *silence* — the whole mix rolls off and the world goes flat
+  - *fog* — the air thickens and warms; neither hunter can begin a charge while
+    it is at its densest
+  - *silence* — the whole mix rolls off and the world goes flat; footsteps and
+    charge warnings disappear, but a missed shot cannot schedule a second
+    answer or hurry a hunter that is already present
   - *breathing* — the corridor inhales; the FOV swells and contracts
   - *swarm* — a dozen pairs of eyes open around you at once
   - *redshift* — the place turns arterial and your pulse comes up
-  - *blackout* — the torch simply stops, and something arrives while it is off
+  - *blackout* — the torch simply stops, and the creature reliably arrives
+    while it is off
   - *crowd* — the ceiling lights come up, the corridor is full, then dark again
 
 Everything is gated behind a rising `dread` value, so the first minute is calm

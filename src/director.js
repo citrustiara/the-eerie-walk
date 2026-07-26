@@ -115,6 +115,20 @@ export class Director {
 
   _rand(a, b) { return a + this.rng() * (b - a); }
 
+  _anomalyStrength(type) {
+    const a = this.anomaly;
+    if (!a || a.type !== type || a.leaving) return 0;
+    return Math.sin(Math.min(1, a.t / a.dur) * Math.PI);
+  }
+
+  _isSilent() {
+    return this.anomaly?.type === 'silence';
+  }
+
+  _fogConceals() {
+    return this._anomalyStrength('fog') >= 0.62;
+  }
+
   _schedule(key, time) {
     const cfg = HORROR.events[key];
     if (this.hasGun && key === 'phantomSteps') {
@@ -224,6 +238,37 @@ export class Director {
       }
     }
     return null;
+  }
+
+  // Reachable but not necessarily visible. This is the final placement fallback
+  // for things delivered while the torch is off: a bend in the corridor should
+  // hide them, not prevent the event from existing.
+  _placeReachable(minDist, maxDist) {
+    const p = this.player;
+    const sx = Math.floor(p.x), sy = Math.floor(p.y);
+    const queue = [{ cx: sx, cy: sy }];
+    const seen = new Set([`${sx},${sy}`]);
+    const candidates = [];
+    let head = 0;
+    const limit = Math.ceil(maxDist) + 8;
+
+    while (head < queue.length && queue.length < 2048) {
+      const cur = queue[head++];
+      const dx = cur.cx + 0.5 - p.x, dy = cur.cy + 0.5 - p.y;
+      const d = Math.hypot(dx, dy);
+      if (d >= minDist && d <= maxDist) candidates.push(cur);
+      if (Math.abs(cur.cx - sx) + Math.abs(cur.cy - sy) >= limit) continue;
+      for (let i = 0; i < 4; i++) {
+        const cx = cur.cx + FLOW_DX[i], cy = cur.cy + FLOW_DY[i];
+        const key = `${cx},${cy}`;
+        if (seen.has(key) || this.world.blocked(cx, cy)) continue;
+        seen.add(key);
+        queue.push({ cx, cy });
+      }
+    }
+    if (!candidates.length) return null;
+    const pick = candidates[(this.rng() * candidates.length) | 0];
+    return { x: pick.cx + 0.5, y: pick.cy + 0.5 };
   }
 
   // A short, cold-path breadth-first search used for authored-looking guidance.
@@ -787,7 +832,7 @@ export class Director {
       const distFromPlayer = Math.hypot(ph.srcX - p.x, ph.srcY - p.y);
       const pan = clamp(Math.sin(rel), -1, 1);
       const vol = clamp(0.9 / (1 + distFromPlayer * 0.24), 0.16, 0.64);
-      this.audio.playPhantomStep(pan, vol);
+      if (!this._isSilent()) this.audio.playPhantomStep(pan, vol);
       ph.nextStep = time + this._rand(0.30, 0.43);
 
       const dx = ph.targetX - ph.srcX, dy = ph.targetY - ph.srcY;
@@ -795,7 +840,7 @@ export class Director {
       if (remaining <= ph.step || ph.stepsLeft-- <= 1) {
         ph.srcX = ph.targetX;
         ph.srcY = ph.targetY;
-        this.audio.playShellDrop(pan);
+        if (!this._isSilent()) this.audio.playShellDrop(pan);
         this.phantom = null;
         return;
       }
@@ -817,7 +862,7 @@ export class Director {
       const force = this.hasGun ? 1.05 : 0.5;
       const vol = clamp(force / (1 + dist * 0.32), this.hasGun ? 0.14 : 0.05, this.hasGun ? 0.78 : 0.45);
       const pan = clamp(Math.sin(rel), -1, 1);
-      this.audio.playPhantomStep(pan, vol);
+      if (!this._isSilent()) this.audio.playPhantomStep(pan, vol);
       ph.nextStep = time + (this.hasGun ? this._rand(0.24, 0.40) : this._rand(0.42, 0.6));
       ph.stepsLeft--;
       const toward = Math.atan2(p.y - ph.srcY, p.x - ph.srcX);
@@ -867,7 +912,8 @@ export class Director {
   _spawnCreature(force) {
     if (this.creature && !force) return false;
     const spot = this._placeOutOfSight(CREATURE.spawnMin, CREATURE.spawnMax)
-      || this._placeInSight(CREATURE.spawnMin, CREATURE.spawnMax);
+      || this._placeInSight(CREATURE.spawnMin, CREATURE.spawnMax)
+      || this._placeReachable(CREATURE.spawnMin, CREATURE.spawnMax);
     if (!spot) return false;
 
     const p = this.player;
@@ -1016,7 +1062,8 @@ export class Director {
       // walking is enough.
       if (CREATURE.canCharge &&
           this.dread >= CREATURE.chargeFrom && dist <= CREATURE.chargeDistance &&
-          c.t >= c.nextChargeRoll && this._hasLineOfSight(c.x, c.y)) {
+          c.t >= c.nextChargeRoll && !this._fogConceals() &&
+          this._hasLineOfSight(c.x, c.y)) {
         c.nextChargeRoll = c.t + CREATURE.chargeRollEvery;
         if (this.rng() < CREATURE.chargeChance + this.dread * 0.28) this._beginCharge(c, bearing);
       }
@@ -1078,7 +1125,9 @@ export class Director {
       c.lastStepPhase = stepIndex;
       const rel = wrapAngle(bearing - p.angle);
       const vol = clamp(0.55 / (1 + dist * 0.30), 0.03, 0.55);
-      if (dist < 15) this.audio.playCreatureStep(clamp(Math.sin(rel), -1, 1), vol);
+      if (dist < 15 && !this._isSilent()) {
+        this.audio.playCreatureStep(clamp(Math.sin(rel), -1, 1), vol);
+      }
     }
 
     // --- audio proximity ----------------------------------------------------
@@ -1273,10 +1322,11 @@ export class Director {
       h.speed = HUNTER.paceSpeed * (1 + clamp((dist - HUNTER.catchUpFrom) / 12, 0, HUNTER.catchUpMax));
       h.reach += (0.25 - h.reach) * dt * 2;
       h.mouth += (0.45 - h.mouth) * dt * 2;
-      if (dist <= HUNTER.chargeFrom && h.t >= h.nextChargeAt && this._hasLineOfSight(h.x, h.y)) {
+      if (dist <= HUNTER.chargeFrom && h.t >= h.nextChargeAt &&
+          !this._fogConceals() && this._hasLineOfSight(h.x, h.y)) {
         h.mode = 'wind';
         h.windUntil = h.t + HUNTER.chargeWindUp;
-        this.audio.playHunterCharge(0.8);
+        if (!this._isSilent()) this.audio.playHunterCharge(0.8);
         this.shake = 0.35;
       }
     } else if (h.mode === 'wind') {
@@ -1365,7 +1415,7 @@ export class Director {
         // Falls off much more slowly than the creature's step, so the first
         // thing you get is the sound of something enormous a long way off.
         const vol = clamp(0.75 / (1 + dist * 0.10), 0.06, 0.75);
-        this.audio.playHunterStep(clamp(Math.sin(rel), -1, 1), vol);
+        if (!this._isSilent()) this.audio.playHunterStep(clamp(Math.sin(rel), -1, 1), vol);
       }
     }
 
@@ -1649,18 +1699,25 @@ export class Director {
         // Two thirds of the way through, something arrives. When the light
         // catches again it is already there.
         if (!a.delivered && k > 0.62) {
-          a.delivered = true;
-          if (!this.creature) {
+          if (this.creature) {
+            a.delivered = true;
+          } else {
             // Far enough out that the returning beam finds it walking, rather
             // than finding it already on top of you — which was a jumpscare in
             // everything but name. It also has to clear CREATURE.vanishDistance
             // by a margin, or the light comes back on something that is already
             // close enough to leave again on the same frame.
             const spot = this._placeInSight(7.0, 9.5) || this._placeOutOfSight(7.0, 10.0);
-            if (spot && this._spawnCreature(true)) {
-              this.creature.x = spot.x;
-              this.creature.y = spot.y;
+            // _spawnCreature has its own valid fallback. The old code required
+            // `spot` first and permanently marked the delivery complete even
+            // when no spot was found, so some blackouts meant nothing at all.
+            if (this._spawnCreature(true)) {
+              if (spot) {
+                this.creature.x = spot.x;
+                this.creature.y = spot.y;
+              }
               this.creature.mouth = 0.8;
+              a.delivered = true;
             }
           }
         }
@@ -1781,6 +1838,11 @@ export class Director {
   // ==========================================================================
 
   _armNoiseReply() {
+    // Silence is a real window in the rules, not just a low-pass filter. The
+    // first shot still arms the hunt in _armHunt, but misses made while the
+    // building is silent cannot schedule another answer or hurry an existing
+    // hunter into its next charge.
+    if (this._isSilent()) return;
     if (this.noiseReplyAt || this.now < this.noiseQuietUntil) return;
     this.noiseQuietUntil = this.now + NOISE.cooldown;
     this.noiseReplyAt = this.now + this._rand(NOISE.replyDelay[0], NOISE.replyDelay[1]);
