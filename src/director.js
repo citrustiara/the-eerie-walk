@@ -11,7 +11,7 @@
 //     watched rather than vanishing, and past a dread threshold will run you
 //     down and put its face through the screen
 //   * you have twelve rounds and no reload, and shooting it drives it off
-//   * seven anomalies instead of two, gated so the session escalates from
+//   * six anomalies instead of two, gated so the session escalates from
 //     "the air got thicker" to "there are twelve of them standing in the hall"
 //
 // update() returns a set of environment modifiers the renderer consumes; it
@@ -1692,9 +1692,6 @@ export class Director {
         this.audio.duck(0.05, 0.5);
         this.audio.muffleFor(260, a.dur);
         break;
-      case 'breathing':
-        this.audio.playDrone({ freq: this._rand(26, 33), dur: a.dur, volume: 0.22 });
-        break;
       case 'swarm': {
         // A billboard cannot visibly turn its head: every sprite always faces
         // the camera. Direction is therefore expressed as a wave. Eyes furthest
@@ -1824,17 +1821,6 @@ export class Director {
       case 'silence':
         fx.fogDensity *= 1 + env * 1.1;
         break;
-
-      case 'breathing': {
-        // The corridor inhales. The FOV swells and contracts on a slow four
-        // second cycle and the light dims on the out-breath.
-        const breath = Math.sin(a.t * 1.55);
-        fx.fovScale = 1 + breath * 0.13 * env;
-        fx.ambient *= 1 + breath * 0.35 * env;
-        fx.fogDensity *= 1 + (0.35 + breath * 0.3) * env;
-        fx.shakeY += breath * 3.2 * env;
-        break;
-      }
 
       case 'swarm': {
         for (const e of a.eyes) {

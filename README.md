@@ -642,7 +642,6 @@ you and it.
   - *silence* — the whole mix rolls off and the world goes flat; footsteps and
     charge warnings disappear, but a missed shot cannot schedule a second
     answer or hurry a hunter that is already present
-  - *breathing* — the corridor inhales; the FOV swells and contracts
   - *swarm* — a dozen pairs of eyes open in a directional wave: the last,
     largest pair marks the gun, a reserved hunter arrival, or whatever is
     already following you

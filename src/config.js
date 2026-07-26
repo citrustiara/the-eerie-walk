@@ -463,13 +463,12 @@ export const KEEP_AWAY = {
   ritual: 7.0,      // whatever the landmark events put in the room
 };
 
-// Spatial anomalies. Two of these (fog, silence) existed; the other five are
+// Spatial anomalies. Two of these (fog, silence) existed; the other four are
 // new. Each has a dread gate so the session escalates from "the air got thick"
 // to "there are twelve of them standing in the corridor".
 export const ANOMALIES = {
   fog:       { gate: 0.10, weight: 3, dur: [3.5, 5.5] },
   silence:   { gate: 0.10, weight: 3, dur: [4.0, 6.5] },
-  breathing: { gate: 0.14, weight: 3, dur: [5.0, 8.0] },  // the walls inhale
   swarm:     { gate: 0.22, weight: 2, dur: [4.0, 6.0] },  // eyes open all around you
   // Redshift is never drawn from the random anomaly bag. The director starts it
   // shortly before an arrival, charge, or landmark ritual, so the colour
