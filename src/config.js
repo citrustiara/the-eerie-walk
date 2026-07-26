@@ -458,7 +458,7 @@ export const HORROR = {
 // the fastest way to make it leave.
 export const KEEP_AWAY = {
   eyes: 8.0,        // the single pair down the corridor
-  swarm: 7.0,       // ...and the dozen of them
+  swarm: 1.0,       // how much closer you may get to a swarm pair before it leaves
   crowd: 6.5,       // the bodies under the lit panels
   ritual: 7.0,      // whatever the landmark events put in the room
 };

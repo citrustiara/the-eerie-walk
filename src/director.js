@@ -1575,14 +1575,32 @@ export class Director {
   // Anomalies
   // ==========================================================================
 
+  _anomalyTarget() {
+    if (this.gunSite && !this.gunSite.pickedUp) {
+      return { x: this.gunSite.x, y: this.gunSite.y, kind: 'gun' };
+    }
+    if (this.hunterArrivalSpot) {
+      return { x: this.hunterArrivalSpot.x, y: this.hunterArrivalSpot.y, kind: 'arrival' };
+    }
+    if (this.hunter) return { x: this.hunter.x, y: this.hunter.y, kind: 'hunter' };
+    if (this.pendingRitual) {
+      return { x: this.pendingRitual.cx, y: this.pendingRitual.cy, kind: 'ritual' };
+    }
+    if (this.creature) return { x: this.creature.x, y: this.creature.y, kind: 'creature' };
+    return null;
+  }
+
   _startAnomaly(forcedType = null, omen = null) {
     if (this.anomaly) return false;
+    const guideTarget = this._anomalyTarget();
+    if (forcedType === 'swarm' && !guideTarget) return false;
     // Weighted pick among the ones dread has unlocked.
     // Redshift is deliberately absent: it is started by _updateOmenWatch or by
     // the hunter charge decision, never by a timer that has nothing to predict.
     const eligible = forcedType ? [forcedType] :
       ANOMALY_KEYS.filter((k) => k !== 'redshift' &&
-        this.dread >= ANOMALIES[k].gate && ANOMALIES[k].weight > 0);
+        this.dread >= ANOMALIES[k].gate && ANOMALIES[k].weight > 0 &&
+        (k !== 'swarm' || guideTarget));
     if (!eligible.length) return false;
     let total = 0;
     for (const k of eligible) total += ANOMALIES[k].weight;
@@ -1611,11 +1629,14 @@ export class Director {
         this.audio.playDrone({ freq: this._rand(26, 33), dur: a.dur, volume: 0.22 });
         break;
       case 'swarm': {
-        // Eyes open all around you, at every distance, in every direction. They
-        // need line of sight, not just an open cell — without it most of them
-        // open up inside a wall and the anomaly is thirty seconds of nothing.
+        // A billboard cannot visibly turn its head: every sprite always faces
+        // the camera. Direction is therefore expressed as a wave. Eyes furthest
+        // from the meaningful bearing open first; the wave ends on a larger pair
+        // at the gun or the direction already reserved for the hunter.
         a.eyes = [];
+        a.target = guideTarget;
         const p = this.player;
+        const targetBearing = Math.atan2(guideTarget.y - p.y, guideTarget.x - p.x);
         const n = 10 + ((this.rng() * 8) | 0);
         for (let i = 0; i < n; i++) {
           for (let tries = 0; tries < 10; tries++) {
@@ -1624,18 +1645,36 @@ export class Director {
             const x = p.x + Math.cos(ang) * d;
             const y = p.y + Math.sin(ang) * d;
             if (!this._openAt(x, y) || !this._hasLineOfSight(x, y)) continue;
+            const toward = 1 - Math.abs(wrapAngle(ang - targetBearing)) / Math.PI;
             a.eyes.push({
               x, y,
-              delay: this.rng() * 1.6,
-              scale: this._rand(0.14, 0.30),
+              delay: toward * 1.25 + this.rng() * 0.18,
+              scale: this._rand(0.14, 0.28) * (0.86 + toward * 0.32),
               z: this._rand(0.30, 0.62),   // between waist and above head height
+              startDist: d,
             });
             break;
           }
         }
+
+        const targetDist = Math.hypot(guideTarget.x - p.x, guideTarget.y - p.y);
+        let beaconX = guideTarget.x, beaconY = guideTarget.y;
+        if (targetDist > 14 || !this._hasLineOfSight(beaconX, beaconY)) {
+          const ray = Math.min(12.5, this._castDistance(p.x, p.y, targetBearing, 14) - 0.45);
+          beaconX = p.x + Math.cos(targetBearing) * ray;
+          beaconY = p.y + Math.sin(targetBearing) * ray;
+        }
+        const beaconDist = Math.hypot(beaconX - p.x, beaconY - p.y);
+        if (beaconDist >= 2.2 && this._openAt(beaconX, beaconY)) {
+          a.eyes.push({
+            x: beaconX, y: beaconY, delay: 1.48, scale: 0.38, z: 0.62,
+            startDist: beaconDist, beacon: true,
+          });
+        }
         this.audio.playDrone({ freq: 39, dur: a.dur, volume: 0.14 });
         this.audio.playWhisper({ pan: -0.7, volume: 0.10 });
-        this.audio.playWhisper({ pan: 0.7, volume: 0.10 });
+        const rel = wrapAngle(targetBearing - p.angle);
+        this.audio.playWhisper({ pan: clamp(Math.sin(rel), -1, 1), volume: 0.12 });
         break;
       }
       case 'redshift':
@@ -1733,7 +1772,8 @@ export class Director {
           const fade = clamp(t / 0.7, 0, 1) * Math.max(out, clamp((a.dur - a.t) / 0.9, 0, 1));
           fx.entities.push({
             x: e.x, y: e.y, tex: 'redEyes',
-            scale: e.scale, alpha: fade * 0.9, glow: true, z: e.z,
+            scale: e.scale * (e.beacon ? 1 + Math.sin(a.t * 5.2) * 0.06 : 1),
+            alpha: fade * (e.beacon ? 1 : 0.9), glow: true, z: e.z,
           });
         }
         // Deliberately no extra fog here: the point of the anomaly is seeing
@@ -1807,12 +1847,17 @@ export class Director {
     // on the nearest of them, for the same reason the single pair of eyes does:
     // a dozen shapes in the fog is the event, and a dozen shapes you can walk
     // up to and inspect is a diorama.
-    if (!a.leaving && (a.type === 'swarm' || a.type === 'crowd')) {
-      const keep = KEEP_AWAY[a.type];
-      const list = a.type === 'swarm' ? a.eyes : a.figures;
+    if (!a.leaving && a.type === 'swarm') {
       const p = this.player;
-      for (const e of list) {
-        if ((e.x - p.x) ** 2 + (e.y - p.y) ** 2 < keep * keep) { a.t = a.dur; break; }
+      for (const e of a.eyes) {
+        // Measure approach, not absolute range. The old fixed seven-unit test
+        // deleted the event on its first frame whenever any randomly placed eye
+        // happened to start closer than seven.
+        const leaveAt = Math.max(1.2, e.startDist - KEEP_AWAY.swarm);
+        if ((e.x - p.x) ** 2 + (e.y - p.y) ** 2 < leaveAt * leaveAt) {
+          a.t = a.dur;
+          break;
+        }
       }
     }
 

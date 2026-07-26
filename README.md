@@ -643,7 +643,9 @@ you and it.
     charge warnings disappear, but a missed shot cannot schedule a second
     answer or hurry a hunter that is already present
   - *breathing* — the corridor inhales; the FOV swells and contracts
-  - *swarm* — a dozen pairs of eyes open around you at once
+  - *swarm* — a dozen pairs of eyes open in a directional wave: the last,
+    largest pair marks the gun, a reserved hunter arrival, or whatever is
+    already following you
   - *redshift* — the place turns arterial shortly before a hunter arrives or
     charges, or before a landmark ritual fires; it is never selected randomly
   - *blackout* — the torch simply stops, and the creature reliably arrives
