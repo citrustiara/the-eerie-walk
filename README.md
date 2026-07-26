@@ -529,6 +529,15 @@ things fix that without giving it away:
   The gun on the floor of the ward, or on the chapel plinth, is somewhere you
   can find again and somewhere you will remember finding.
 
+The invitation escalates without becoming a marker. After nine seconds the
+metal catches the flashlight once; after eighteen, footsteps cross behind you
+and stop at the weapon; after twenty-eight, small blood drops reveal the final
+few cells of a walkable route to it. A player who gets measurably closer has
+understood the clue, so that placement no longer expires. Landmark placements
+also borrow the sound of their room — the shaft breathes, the ward answers, the
+chapel calls — and the first two placements now obey the out-of-view rule even
+when an anchor is available.
+
 Measured with a bot that turns toward the clink the way a player would: found at
 **21 s** on the first placement. With a bot that wanders blindly and walks into
 walls a third of the time: 141 s, on the third — the one placed in front.

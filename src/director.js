@@ -226,6 +226,49 @@ export class Director {
     return null;
   }
 
+  // A short, cold-path breadth-first search used for authored-looking guidance.
+  // Gun sites are at most sixteen cells away, so strings and arrays here cost
+  // less than trying to reuse the hot creature flow field and, unlike a straight
+  // line, the resulting trail never paints blood through a wall.
+  _pathBetween(fromX, fromY, toX, toY, maxNodes = 2048) {
+    const sx = Math.floor(fromX), sy = Math.floor(fromY);
+    const tx = Math.floor(toX), ty = Math.floor(toY);
+    const start = `${sx},${sy}`, goal = `${tx},${ty}`;
+    if (start === goal) return [{ cx: sx, cy: sy }];
+
+    const margin = 7;
+    const minX = Math.min(sx, tx) - margin, maxX = Math.max(sx, tx) + margin;
+    const minY = Math.min(sy, ty) - margin, maxY = Math.max(sy, ty) + margin;
+    const queue = [{ cx: sx, cy: sy }];
+    const parent = new Map([[start, null]]);
+    let head = 0;
+
+    while (head < queue.length && queue.length < maxNodes) {
+      const cur = queue[head++];
+      for (let i = 0; i < 4; i++) {
+        const cx = cur.cx + FLOW_DX[i], cy = cur.cy + FLOW_DY[i];
+        if (cx < minX || cx > maxX || cy < minY || cy > maxY) continue;
+        if (this.world.blocked(cx, cy)) continue;
+        const key = `${cx},${cy}`;
+        if (parent.has(key)) continue;
+        parent.set(key, `${cur.cx},${cur.cy}`);
+        if (key === goal) {
+          const path = [{ cx, cy }];
+          let prev = parent.get(key);
+          while (prev) {
+            const comma = prev.indexOf(',');
+            path.push({ cx: Number(prev.slice(0, comma)), cy: Number(prev.slice(comma + 1)) });
+            prev = parent.get(prev);
+          }
+          path.reverse();
+          return path;
+        }
+        queue.push({ cx, cy });
+      }
+    }
+    return null;
+  }
+
   // --- debug ----------------------------------------------------------------
 
   debugSpawn(kind) {
@@ -652,6 +695,9 @@ export class Director {
         break;
 
       case 'phantomSteps': {
+        // Do not overwrite the one set of footsteps that is actually going
+        // somewhere: late gun guidance crosses the player and ends at the site.
+        if (this.phantom && this.phantom.mode === 'gunGuide') break;
         const p = this.player;
         const bearing = p.angle + Math.PI + this._rand(-0.35, 0.35);
         const dist = this.hasGun ? this._rand(2.8, 4.6) : this._rand(4, 6);
@@ -735,6 +781,28 @@ export class Director {
     if (!ph) return;
     const p = this.player;
     const rel = wrapAngle(Math.atan2(ph.srcY - p.y, ph.srcX - p.x) - p.angle);
+
+    if (ph.mode === 'gunGuide') {
+      if (time < ph.nextStep) return;
+      const distFromPlayer = Math.hypot(ph.srcX - p.x, ph.srcY - p.y);
+      const pan = clamp(Math.sin(rel), -1, 1);
+      const vol = clamp(0.9 / (1 + distFromPlayer * 0.24), 0.16, 0.64);
+      this.audio.playPhantomStep(pan, vol);
+      ph.nextStep = time + this._rand(0.30, 0.43);
+
+      const dx = ph.targetX - ph.srcX, dy = ph.targetY - ph.srcY;
+      const remaining = Math.hypot(dx, dy);
+      if (remaining <= ph.step || ph.stepsLeft-- <= 1) {
+        ph.srcX = ph.targetX;
+        ph.srcY = ph.targetY;
+        this.audio.playShellDrop(pan);
+        this.phantom = null;
+        return;
+      }
+      ph.srcX += dx / remaining * ph.step;
+      ph.srcY += dy / remaining * ph.step;
+      return;
+    }
 
     // The signature beat: if the player turns to face the source, the steps
     // stop dead. Silence is the scare.
@@ -1913,6 +1981,46 @@ export class Director {
     if (!site) return;
 
     const dist = Math.hypot(site.x - this.player.x, site.y - this.player.y);
+    const age = this.elapsed - site.spawnedAt;
+
+    // A player who has made measurable progress has understood the clue. Taking
+    // the gun away after that would turn a discovery into a timer they were
+    // never told about, so a committed site no longer expires.
+    site.closestDist = Math.min(site.closestDist, dist);
+    if (!site.committed && site.initialDist - site.closestDist >= GUN.progressLock) {
+      site.committed = true;
+    }
+
+    // The second layer is visual and still requires the player to search: once
+    // the torch crosses the weapon's direction, the metal catches for less than
+    // a second. It is a glint in the world, not an arrow over it.
+    if (!site.glinted && age >= GUN.glintAfter && this.player.flashlight &&
+        this._isFacingPoint(site.x, site.y, 0.48)) {
+      site.glinted = true;
+      site.glintUntil = this.elapsed + GUN.glintFor;
+      this.audio.flickerWhine(0.18);
+    }
+
+    // If the clinks were not enough, footsteps begin behind the player, cross
+    // their position, and stop at the gun. They wait for an unrelated phantom
+    // to finish instead of replacing it halfway through a step.
+    if (!site.footstepsUsed && age >= GUN.footstepsAfter && !this.phantom) {
+      const dx = site.x - this.player.x, dy = site.y - this.player.y;
+      const d = Math.hypot(dx, dy) || 1;
+      const ux = dx / d, uy = dy / d;
+      const cross = (this.rng() - 0.5) * 0.8;
+      site.footstepsUsed = true;
+      this.phantom = {
+        mode: 'gunGuide',
+        srcX: this.player.x - ux * 2.4 - uy * cross,
+        srcY: this.player.y - uy * 2.4 + ux * cross,
+        targetX: site.x,
+        targetY: site.y,
+        step: 0.58,
+        stepsLeft: Math.ceil((d + 2.4) / 0.58) + 2,
+        nextStep: time + 0.2,
+      };
+    }
 
     // It keeps announcing itself. You cannot watch it arrive, so the clink is
     // the only way you learn it is there, and once is easy to miss — but each
@@ -1932,7 +2040,7 @@ export class Director {
       if (this.onGunPickup) this.onGunPickup(site);
     }
 
-    if (!site.pickedUp && this.elapsed - site.spawnedAt > GUN.visibleFor) {
+    if (!site.pickedUp && !site.committed && age > GUN.visibleFor) {
       this.gunSite = null;
       this.nextGunTryAt = this.elapsed + GUN.respawnAfter;
       return;
@@ -1946,8 +2054,12 @@ export class Director {
       fx.meshes.push({
         x: site.x, y: site.y, yaw: site.yaw,
         key: 'gunPickup', scale: GUN.pickupScale,
+        dim: this.elapsed < site.glintUntil ? 3.4 : 1,
         seed: site.seed ^ 0x6d2b79f5,
       });
+    }
+    if (!site.pickedUp && age >= GUN.trailAfter) {
+      for (const drop of site.trail) fx.meshes.push(drop);
     }
   }
 
@@ -1970,7 +2082,9 @@ export class Director {
     // again and somewhere you will remember finding — which is worth far more
     // than the couple of metres of extra walking it costs.
     const anchor = this.world.nearestAnchor(p.x, p.y, GUN.anchorRadius, GUN_ANCHOR);
-    if (anchor && this._canPlaceGun(anchor.cx, anchor.cy)) best = anchor;
+    if (anchor && this._canPlaceGun(anchor.cx, anchor.cy) && behind(anchor.cx, anchor.cy)) {
+      best = { ...anchor, landmark: this.world.landmarkAt(anchor.cx, anchor.cy) };
+    }
 
     // Otherwise: behind you. Watching a pistol appear on the carpet ten metres
     // ahead is a spawn; turning round and finding one you walked straight past
@@ -2013,22 +2127,68 @@ export class Director {
       return false;
     }
     const seed = (this.rng() * 0xffffffff) >>> 0;
+    const x = best.cx + 0.5 + this._rand(-0.12, 0.12);
+    const y = best.cy + 0.5 + this._rand(-0.12, 0.12);
+    const initialDist = Math.hypot(x - p.x, y - p.y);
+    const path = this._pathBetween(p.x, p.y, x, y) || [];
+    const trail = [];
+    const firstDrop = Math.max(1, path.length - 6);
+    for (let i = firstDrop; i < path.length - 1; i++) {
+      if ((i - firstDrop) % 2 && i !== path.length - 2) continue;
+      const cell = path[i];
+      trail.push({
+        x: cell.cx + 0.5 + this._rand(-0.22, 0.22),
+        y: cell.cy + 0.5 + this._rand(-0.22, 0.22),
+        yaw: this._rand(0, Math.PI * 2),
+        key: 'bloodSmall',
+        scale: this._rand(0.28, 0.52),
+        seed: seed ^ (i * 0x9e3779b1),
+      });
+    }
     this.gunPlacements++;
     this.gunSite = {
-      x: best.cx + 0.5 + this._rand(-0.12, 0.12),
-      y: best.cy + 0.5 + this._rand(-0.12, 0.12),
+      x, y,
       yaw: this._rand(0, Math.PI * 2),
       seed,
       spawnedAt: this.elapsed,
       nextCue: this.elapsed + GUN.cueEvery,
       pickedUp: false,
+      initialDist,
+      closestDist: initialDist,
+      committed: false,
+      glintUntil: 0,
+      trail,
+      landmark: best.landmark || null,
     };
     // Since you cannot see it land, you get to hear it: metal on carpet, panned
     // to where it is. That is the whole invitation to turn around.
     const rel = wrapAngle(Math.atan2(this.gunSite.y - p.y, this.gunSite.x - p.x) - p.angle);
-    this.audio.playShellDrop(clamp(Math.sin(rel), -1, 1));
+    const pan = clamp(Math.sin(rel), -1, 1);
+    this.audio.playShellDrop(pan);
     this.audio.quietBeat({ target: 0.19, attack: 0.16, hold: 1.15, release: 1.5 });
+    this._playGunLandmarkCue(this.gunSite, pan);
     return true;
+  }
+
+  _playGunLandmarkCue(site, pan) {
+    switch (site.landmark) {
+      case 'ward':
+        this.audio.playDistantBang(pan);
+        break;
+      case 'atrium':
+        this.audio.playDrone({ freq: 43, dur: 2.6, volume: 0.11 });
+        break;
+      case 'shaft':
+        this.audio.playPitDraft(pan, 0.22);
+        break;
+      case 'combs':
+        this.audio.playWhisper({ pan: clamp(pan - 0.2, -1, 1), volume: 0.07 });
+        this.audio.playWhisper({ pan: clamp(pan + 0.2, -1, 1), volume: 0.07 });
+        break;
+      case 'chapel':
+        this.audio.playDistantCall(0.28, pan);
+        break;
+    }
   }
 
   _canPlaceGun(cx, cy) {

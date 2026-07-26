@@ -205,6 +205,15 @@ export const GUN = {
   cueEvery: 7,              // seconds between "there is something over here" clinks
   cueGrowth: 0.28,          // each repeat waits this much longer than the last
   respawnAfter: 2.5,        // seconds between missed gun sites
+  // The invitation becomes less ambiguous the longer it is ignored, but never
+  // turns into a HUD marker. First the metal catches the torch, then footsteps
+  // cross the player's path and stop at it, and only very late does the blood
+  // around the weapon reveal the last few cells of the route.
+  glintAfter: 9,
+  glintFor: 0.7,
+  footstepsAfter: 18,
+  trailAfter: 28,
+  progressLock: 0.8,        // getting this much closer makes the site persistent
   // From this placement on it stops caring about being out of your view cone
   // and starts appearing wherever it can, including in front of you.
   patienceRuns: 2,
