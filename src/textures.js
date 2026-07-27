@@ -22,6 +22,8 @@
 
 import { packRGBA, hash2, clamp } from './mathutils.js';
 import { fbm } from './noise.js';
+import { OUTSIDE } from './config.js';
+import { groundHeight, FIELD } from './terrain.js';
 
 export const WALL_W = 256;   // wall texel width...
 export const WALL_H = 64;    // ...and height: floor to ceiling
@@ -761,6 +763,176 @@ function groundTexture() {
   return t;
 }
 
+// ============================================================================
+// THE MACRO GROUND — one texture for the whole field, and the reason the
+// outside stopped looking like a plane.
+//
+// Everything else in this file TILES. That is correct indoors, where the
+// furthest thing you can see is twenty-six units into fog and a four-cell
+// period never comes round twice in shot. Outside the view distance is
+// seventy-four and the ground goes to the horizon, so the twelve-metre carpet
+// of `groundTexture` above repeats eighteen times between your feet and the
+// treeline — visibly, in rows, like tiled lino.
+//
+// So the field gets a SECOND ground layer that does not tile: one texel grid
+// stretched once over the whole stamped region, sampled by absolute position,
+// carrying the things that vary at the scale of a landscape rather than at the
+// scale of a boot —
+//
+//   RGB   a modulation of whatever the tiling ground says here, 128 = neutral.
+//         Slope shading, damp hollows against dry rises, and the pale silt
+//         collar around standing water. Multiplicative, so all the detail in
+//         the tiling layer survives and only its colour and value move.
+//   A     how deep the water is. The renderer turns this into sky (see the
+//         reflection in the floor pass), which is the whole trick: water is the
+//         one kind of terrain a flat-plane renderer can draw honestly, because
+//         real water is also flat.
+//
+// SHADING IS THE POINT. The floor is a plane at z = 0 and nothing can raise it.
+// But relief is read from light long before it is read from silhouette — a
+// photograph of a ploughed field is flat too — so the gradient of the height
+// field is lit from the same quarter of the sky the dawn glow comes from, and
+// the eye fills in ground that is not there. It works because the fiction is
+// never contradicted: the amplitude is under a metre and a half over twenty
+// metre wavelengths, which is exactly the range where you cannot tell.
+//
+// NEAREST SAMPLING, ON PURPOSE. A texel is 78 cm and the renderer takes it
+// unfiltered, which would band a smooth gradient into visible squares. The fix
+// is not bilinear (four fetches per floor pixel, every frame, for a field that
+// barely changes across a metre) — it is to bake mottling INTO the layer at
+// greater amplitude than one texel's worth of gradient. Quantisation you cannot
+// find because it is quieter than the noise on top of it.
+export const TERRAIN_W = 768;
+export const TERRAIN_H = 576;
+export const TERRAIN_SCALE = TERRAIN_W / OUTSIDE.width;   // texels per cell
+
+// The fine relief — ruts, ridges, poached ground, the ten-to-thirty centimetres
+// over two or three metres that is what a field actually looks like.
+//
+// THIS IS NOT IN terrain.js AND MUST NOT BE. The height field there decides
+// where the water goes, and water finds contours tens of metres across; adding
+// a metres-wide wobble to it would speckle every shoreline in the region with
+// puddles the size of a bath. So the shape that HOLDS water and the shape that
+// CATCHES LIGHT are two different fields, and only the second one is here.
+//
+// It also has to be, arithmetically. The first version shaded the real field
+// and the relief was invisible, for a reason that is obvious afterwards: a
+// metre of rise over sixty is a slope of one degree, and one degree of lambert
+// is half a per cent of brightness. Fields do not read as ground because of
+// their hills. They read as ground because of their ruts.
+function relief(tx, ty) {
+  const a = (hash2((tx >> 2) * 13 + 7, (ty >> 2) * 17 + 3) - 0.5) * 0.15;
+  const b = (hash2((tx >> 3) * 29 + 11, (ty >> 3) * 23 + 5) - 0.5) * 0.26;
+  const c = (hash2(tx * 5 + 1, ty * 5 + 9) - 0.5) * 0.05;
+  return a + b + c;
+}
+
+function terrainTexture() {
+  const t = make(TERRAIN_W, TERRAIN_H);
+  // Heights first, into their own array. The shading below is a gradient, and
+  // differencing an array that already exists costs four reads where calling
+  // the field again would cost four fBm stacks — about five times the whole
+  // bake, for the same numbers.
+  const h = new Float32Array(TERRAIN_W * TERRAIN_H);
+  // ...and the same thing with the ruts in it, which is what gets differenced.
+  // Flat under water, because water is flat: shading a rut through a flood is
+  // the one thing that would give the whole trick away.
+  const lit = new Float32Array(TERRAIN_W * TERRAIN_H);
+  const doorX = OUTSIDE.width >> 1;
+  const wallY = OUTSIDE.height - OUTSIDE.wallDepth;
+  const inv = 1 / TERRAIN_SCALE;                 // cells per texel
+  for (let ty = 0; ty < TERRAIN_H; ty++) {
+    const out = wallY - (ty + 0.5) * inv;
+    for (let tx = 0; tx < TERRAIN_W; tx++) {
+      const i = ty * TERRAIN_W + tx;
+      const g = groundHeight((tx + 0.5) * inv - doorX, out);
+      h[i] = g;
+      lit[i] = g + (g > FIELD.waterline ? relief(tx, ty) : 0);
+    }
+  }
+
+  // The bearing the light is coming up from, as a direction in the field's own
+  // frame: `across` runs with world x, `out` runs against world y.
+  const ang = DAWN_BEARING * Math.PI * 2;
+  const lAcross = Math.cos(ang), lOut = -Math.sin(ang);
+  // Central difference over two texels, in metres.
+  const dmet = 2 * inv * 3;
+
+  for (let ty = 0; ty < TERRAIN_H; ty++) {
+    const yUp = ty > 0 ? ty - 1 : 0;
+    const yDn = ty < TERRAIN_H - 1 ? ty + 1 : TERRAIN_H - 1;
+    for (let tx = 0; tx < TERRAIN_W; tx++) {
+      const i = ty * TERRAIN_W + tx;
+      const xL = tx > 0 ? tx - 1 : 0;
+      const xR = tx < TERRAIN_W - 1 ? tx + 1 : TERRAIN_W - 1;
+      const height = h[i];
+
+      // Gradient in texel space, of the field WITH the ruts in it. `gy` runs
+      // down the image, which is the NEGATIVE of `out`, hence the sign it is
+      // used with below.
+      const gx = (lit[ty * TERRAIN_W + xR] - lit[ty * TERRAIN_W + xL]) / dmet;
+      const gy = (lit[yDn * TERRAIN_W + tx] - lit[yUp * TERRAIN_W + tx]) / dmet;
+      const facing = -gx * lAcross + gy * lOut;
+
+      // Two octaves of cheap mottle, doing three jobs at once: hiding the texel
+      // grid (see the header), keeping the shoreline ragged, and stopping a
+      // broad damp hollow from reading as an airbrushed stain.
+      const mot = (hash2(tx * 3 + 11, ty * 3 + 5) - 0.5) * 0.7 +
+                  (hash2((tx >> 2) * 7 + 3, (ty >> 2) * 7 + 9) - 0.5) * 1.3;
+
+      // 0.94 because the terms below are net-positive on dry ground and the
+      // whole layer was lifting the field about eight per cent brighter than
+      // the tiling texture it is supposed to be modulating rather than
+      // replacing. Neutral has to actually be neutral.
+      const shade = clamp(0.94 + facing * 1.8 + mot * 0.055, 0.58, 1.46);
+
+      // Water, wobbled by the same field so the edge wanders from texel to
+      // texel instead of stepping along the grid.
+      const wet = height + mot * 0.075;
+      const depth = wet < FIELD.waterline
+        ? Math.min(FIELD.maxDepth, FIELD.waterline - wet) : 0;
+
+      // Dry ground is straw and warm; low ground is dark and cold. This is the
+      // single biggest reason the field stops looking like one material — but
+      // it is a lean on a colour, not a repaint of it. The tiling ground is
+      // already a good deal more yellow than anything indoors, and a dry term
+      // that pushed red up and blue down as hard as the first draft did took it
+      // from wet straw to a lawn in a strategy game.
+      const dry = clamp(height / 0.75, 0, 1);
+      const damp = clamp(-height / 0.45 + 0.35, 0, 1);
+      let r = shade * (1 + dry * 0.06 - damp * 0.15);
+      let g = shade * (1 + dry * 0.04 - damp * 0.10);
+      let b = shade * (1 + dry * 0.00 + damp * 0.06);
+
+      // The silt collar. Ground that has been under water recently and is not
+      // now — pale, bleached, and the thing that actually draws the shape of a
+      // flood on the ground rather than leaving it to the water itself.
+      if (depth === 0) {
+        const silt = Math.exp(-((height / 0.13) ** 2));
+        r += silt * 0.20; g += silt * 0.20; b += silt * 0.22;
+      } else {
+        // The bed. Darker with depth and colder, so the reflection the
+        // renderer lays on top has something to be brighter than — but not
+        // MUCH darker. This was half again as strong and it crushed the tiling
+        // ground underneath to a flat value, so standing in the stream looked
+        // like standing on wet tarmac: the reflection is only half of what
+        // makes shallow water read, and the other half is being able to see
+        // the bottom of it.
+        const k = depth / FIELD.maxDepth;
+        r *= 1 - k * 0.34; g *= 1 - k * 0.30; b *= 1 - k * 0.22;
+      }
+
+      t.data[i] = packRGBA(
+        clamp(r * 128, 0, 255) | 0,
+        clamp(g * 128, 0, 255) | 0,
+        clamp(b * 128, 0, 255) | 0,
+        clamp((depth / FIELD.maxDepth) * 255, 0, 255) | 0,
+      );
+    }
+  }
+  return t;
+}
+
 export const PITS = 64;   // shaft/floor texture size
 export const PIT_TILE = 2; // ...spanning this many world cells
 
@@ -1054,6 +1226,7 @@ export function generateTextures() {
     // door opens would drop the frame the whole ending is riding on.
     sky: skyTexture(),
     ground: groundTexture(),
+    terrain: terrainTexture(),
     shaft: shaftTexture(),
     pitFloor: pitFloorTexture(),
     redEyes: redEyesTexture(),

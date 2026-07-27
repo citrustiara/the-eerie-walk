@@ -396,7 +396,14 @@ function step(dt, t) {
     const blockers = props.near(player.x, player.y, 2.5);
     player.update(dt, input, blockers);
     if (player.justStepped) {
-      audio.playFootstep({ pan: (Math.random() - 0.5) * 0.15, volume: player.sprinting ? 0.42 : undefined });
+      audio.playFootstep({
+        pan: (Math.random() - 0.5) * 0.15,
+        volume: player.sprinting ? 0.42 : undefined,
+        // The field is the only ground in the game that is ever wet enough to
+        // answer back. groundWater is zero everywhere in the building, so this
+        // costs nothing until the frame it matters.
+        wet: world.groundWater(player.x, player.y) > 0.04,
+      });
     }
     renderStamina();
   }
@@ -472,6 +479,7 @@ const introEnv = {
   fogDensity: FOG.density, fogColor: FOG.color, fovScale: 1,
   entities: [], meshes: [], flashlightOn: true, time: 0, dread: 0,
   hasGun: false, gunEquipped: false, scare: 0, muzzleFlash: 0, stress: 0,
+  threatRel: null, threatNear: 0,
   refusal: 0, shakeX: 0, shakeY: 0, grade: null,
 };
 introEnv.meshes = props.near(player.x, player.y);

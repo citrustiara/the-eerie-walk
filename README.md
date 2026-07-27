@@ -69,6 +69,24 @@ single frame without owning the pointer lock, which is how the models and
 lighting were tuned.
 
 Use headphones. The audio is spatial and a lot of the horror lives there.
+World-positioned sounds keep both halves of their bearing: stereo pan supplies
+left/right, while a shared head-shadow stage rolls a source down toward 1.6 kHz,
+softens it and adds room tail as it moves behind you. The `silence` anomaly
+still owns a separate filter on the master bus, so it can flatten the whole mix
+without either effect overwriting the other.
+
+The balance probes that produced the landmark and anomaly-eligibility numbers
+are checked in rather than living in a browser console:
+
+```bash
+npm test
+npm run measure
+```
+
+`npm run measure -- --seeds=1337,7331 --span=25 --draws=10000` overrides the
+defaults. Every seed constructs a fresh world, player and director; persistent
+state such as `landmarksUsed` is explicitly reset between independent position
+probes, so rerunning a sample cannot inherit the previous run.
 
 ### A note on freezes
 
@@ -293,6 +311,82 @@ here) and `G` (the gun prefers to turn up here). A room that was built on
 purpose always has something in it, and the one object in the game that matters
 ends up somewhere you can describe rather than in a corridor.
 
+### Knowing you are in one
+
+All of the above is true and none of it was working, because **shape is the
+hardest channel this renderer has**. At 480×270, through 0.2 fog, from eye
+height, a hand-drawn floor plan is very nearly indistinguishable from noise —
+you could stand in the middle of the chapel and have no idea. Every other
+channel was globally uniform: props rolled from one weighted bag everywhere,
+blood walls were a flat 2.2% everywhere with the archetype rolled from fixed
+weights, and `paperBlood` was shared with two districts. So the marked corner of
+the ward got a traffic cone.
+
+Four channels now carry the room instead of one.
+
+**Kits** (`LANDMARK_KITS`, `objects.js`). Any scene inside a landmark —
+anchored or rolled — is built from that landmark's own list, never the global
+bag. Five models exist for one room each and are pinned at `weight: 0` in
+`PROP_TYPES`, which the weighted picker can never reach: a stripped **bed frame**
+on castors for the ward, a torn section of **safety barrier** for the shaft, and
+a fallen **cross**, spent **candles** and a **pew** for the chapel.
+
+**Aim** does at least as much work as the models. A prop at a random yaw reads
+as dropped; every prop in a landmark is turned to face what the room is built
+around — chairs facing the atrium's empty core, barrier lying *tangent* to the
+rim of the shaft, ward beds snapped square to the walls. The combs is the
+exception and the whole point of having one: it gets **one object, one yaw, one
+seed**, everywhere, forever. Nothing in that room can tell you which row you are
+in.
+
+**Blood that records the room.** `decals.js` always had six archetypes; it just
+rolled them uniformly across an infinite building, so the tally — the one that
+says a *person* was in here for a long time — came up once in twenty-one smears
+somewhere it meant nothing. Inside a landmark the wall is marked several times
+as often and marked with the event that room was for: **handprints and drag** in
+the ward (people were moved down that corridor and some held on), **soak** at
+the shaft's rim, **spray** across the atrium core, and **tally** in the chapel,
+which is now the only place in the building you will ever see one. Age is
+authored too — the chapel's counting stopped a long time ago and the ward's did
+not. The combs gets **nothing at all**: a smear would be a landmark inside the
+landmark. Districts are untouched, still at 2.2% and still rolling their own.
+
+Measured over three seeds:
+
+| | wall cells | marked | archetypes |
+|---|---|---|---|
+| district | 44894 | 1.8% | all six, weighted |
+| ward | 1527 | 13.2% | handprints, drag |
+| chapel | 1988 | 11.4% | tally |
+| shaft | 795 | 9.6% | soak |
+| atrium | 1195 | 5.9% | spray |
+| combs | 1457 | 0.0% | — |
+
+The floor carries it too: a **drag trail** of thinning pools running out of a
+ward room toward the corridor and stopping short of wherever it was going, and a
+ring of marks at the foot of the **chapel plinth** — the one thing every visit
+to that room has in common, and readable from the end of the nave before the
+shape of the room is.
+
+### Being told, without being told
+
+There is no counter and there will not be one. "1 of 5 found" turns the best
+rooms in the building into collectibles and the walk into an errand. Two tiers
+instead (`LANDMARK_VOICE`), neither of them a number:
+
+- **First time in any landmark — no words.** The mix ducks, the fog opens a
+  shade so you can see further into the room than you could walking up to it,
+  and the room plays *its own note*, quietly. That note is the same instrument
+  its ritual uses, so the entry and the event get learnt as one thing and
+  walking in becomes an omen for what the room does.
+- **Second room of a kind, once ever, per kind — one line.** Not "you found a
+  landmark"; something about having been here before. *the same six doors.*
+  *this row is the row you came down.* *it was built to be walked down.* The
+  horror of this building has always been recognition rather than collection —
+  `world.js` has said so from the first commit — and the second time is when
+  that lands. Suppressed while anything is in the room with you; the subtitle
+  slot belongs to the building answering the gun, and that matters more.
+
 **Not done: ramps and multiple floors.** The fixed eye height and the single
 uniform wall height are both gone, so the projection is no longer the obstacle
 it was — a room can be any height, and your eye can be anywhere. What is still
@@ -381,10 +475,10 @@ the floor, are the ones that are rotten and marked.
 | `src/noise.js` | Seeded value noise + fBm, and the per-session layout salt |
 | `src/textures.js` | One wallpaper at six stages of decay, the band above it (with windows), carpet / ceiling / deck / shaft / eyes, all seam-free |
 | `src/mesh.js` | Primitive kit: boxes, prisms, spheres, slabs, transforms |
-| `src/models.js` | Twenty-four prop models, the pistol, brass, bullet holes, blood pools |
+| `src/models.js` | Twenty-four scatter props plus five landmark-only ones, the pistol, brass, bullet holes, blood pools |
 | `src/creature.js` | The creature and the hunter, rebuilt from primitives every frame |
-| `src/objects.js` | Where the props go: deterministic scenes, ~one per 88 open cells |
-| `src/decals.js` | Six archetypes of procedural wall blood |
+| `src/objects.js` | Where the props go: deterministic scenes, ~one per 88 open cells, and the per-landmark kits |
+| `src/decals.js` | Six archetypes of procedural wall blood; a landmark forces its own |
 | `src/player.js` | Movement, collision, mouse-look, head-bob, sprint + stamina |
 | `src/input.js` | Keyboard, mouse-look, pointer lock, trigger |
 | `src/audio.js` | Web Audio: hum, heartbeat, breathing, footsteps, the gun, whispers, reverb |
@@ -527,12 +621,13 @@ the one clink behind you the next two minutes were dead, and whether your
 session had a gun in it at twenty seconds or at four minutes was luck. Three
 things fix that without giving it away:
 
-- A site is now abandoned after **42 seconds** and another one goes down behind
-  you 2.5 seconds later. The worst case became "it keeps following me until I
-  turn round" instead of "I walked for four minutes and found nothing".
-- **Patience runs out.** From the third placement it stops caring about your
-  view cone and starts appearing in front of you, close, where you cannot fail
-  to walk into it.
+- A site is abandoned after **42 seconds** and another one goes down behind you
+  2.5 seconds later. Getting closer extends that placement to 70 seconds, but
+  never makes it permanent; an accidentally approached gun cannot be stranded
+  silently behind you for the rest of the run.
+- **Patience runs out.** After two missed placements the flashlight cuts several
+  times. During a black frame the next gun appears almost directly ahead,
+  close, where you cannot fail to walk into it when the light returns.
 - If a **landmark** has marked a spot for it within sixteen cells, that wins.
   The gun on the floor of the ward, or on the chapel plinth, is somewhere you
   can find again and somewhere you will remember finding.
@@ -576,10 +671,13 @@ never shown.
 **Grace** goes up only from *witnessing*: staying with something the place shows
 you until it has finished, rather than leaving or walking into it.
 
-- A **landmark ritual that runs its own timer out** is worth 0.24. Every one of
-  them also ends early if you close on it — that has always been true, and it is
-  now the difference between the two endings you can be walking toward. Five
-  witnessed rituals is the spine of the run.
+- A **landmark ritual that runs its own timer out while you stand still for it**
+  is worth 0.25, so **four** of them is the door. Stillness is cumulative — 3.4 s,
+  or 55% of that ritual's life, whichever is less — so you can shift your feet,
+  and a short one is not unfairly strict. Closing on the eyes still breaks the
+  event outright, and wandering off while it finishes behind you is worth
+  nothing. The event itself plays out identically either way: what the room does
+  has never been conditional on you, only what it is worth.
 - **Holding a stare** is worth 0.07, capped at 0.28 lifetime. Stand still, with
   the creature inside ten units and inside your view cone, for three unbroken
   seconds. Watching it has always been pure cost — it slows to a crawl while you
@@ -595,6 +693,82 @@ distant calls and the single pair of eyes all stretch their timers by up to 160%
 the fog thins a few percent and the frame goes a shade colder. Redshift already
 taught you that a colour means something is coming; this is that sentence with
 the sign flipped.
+
+#### Being able to work it out
+
+All of the above was true and none of it was *legible*. A rule that is never
+stated, never acknowledged when you follow it, and whose only feedback is a tenth
+of the fog over four minutes is not a rule the player is keeping — it is one they
+are obeying by accident. The best ending in the game was reachable and not
+deducible, which is a worse problem than being hard.
+
+The fix is the one the landmarks already use: a wordless tier that fires every
+time, and a spoken tier that fires late, once, and observes rather than instructs.
+
+- **While it is happening, the fog opens.** Stand still with something up and it
+  gives, over 2.2 seconds, by 30% — and shuts again in 0.45 if you move. That is
+  the whole teaching mechanism and it is one number going one way and then the
+  other. It works because the player has already been taught this exact sentence
+  twice before they ever hold one: the air opens when you walk into a landmark,
+  and it is permanently a shade thinner the more grace you have. This is the
+  third use of the same word, under the one behaviour that earns the way out, and
+  the only one you can switch on and off yourself. A ritual and a held stare use
+  it identically — the lesson is not *rituals reward stillness*, it is that this
+  place gives when you stop.
+- **A breath under it at 1.5 s**, once per hold: the room's own note, at half the
+  volume it uses walking in. Not a chime. The room noticing, in the instrument
+  you already associate with that room.
+- **The room answers when it banks** — its note again, at ritual volume, with the
+  mix ducking under it. The award used to be entirely silent.
+- **Three lines, once each, ever**, in the same register as the recognition lines
+  and never an instruction. *it finished without you* the first time one runs out
+  with you walking about inside it; *it was waiting for you to stop* once you have
+  banked two; *the air has stopped moving* on the round that closes it, and only
+  if there was something to close. Most players get them in that order, which is
+  the right one — you find out something was on offer, then some minutes later
+  what it wanted, and eventually what it cost.
+- **Air with nothing at the end of it.** Past 0.72 grace the building starts
+  moving air every nine to sixteen seconds from a bearing that is different every
+  time and is therefore not a bearing at all. It is the only cue in the game that
+  deliberately leads nowhere: what it teaches is the *sound*, so that when a door
+  does turn up and announces itself with the same draught from a fixed direction,
+  you already know what you are hearing.
+
+Two things fell out of writing it. The pending-line slot was a **slot** and not a
+queue, so two lines inside the same couple of seconds silently replaced each
+other — survivable while the only speaker was a landmark, and not survivable once
+banking a ritual could overwrite the line explaining what banking a ritual was.
+And a line is now marked *said* when it is delivered rather than when it is
+queued, because these three are the only explanation the mechanic ever gets and
+losing one to a hunter walking in would put the player back where they started.
+
+Hanging an ending off the rituals turned up two bugs that had been quietly
+wrecking them since they were written, and both are worth recording because in
+both cases the room appeared to work:
+
+- **The arming was overwritten every frame.** `_updateLandmarkWatch` re-armed
+  `pendingRitual` at `elapsed + 1.2..2.6` on every frame you were inside a
+  landmark, so the moment it was waiting for receded exactly as fast as time
+  passed. What actually happened was that the ritual fired on the first frame you
+  stopped being in the room — out in the corridor, with its eyes scattered around
+  wherever you had got to. The ranks never went down the ward corridor and the
+  ring never went round the atrium core; standing still in a landmark did nothing
+  at all. Measured: **5% of visits produced an event.** With the one-line guard,
+  100%.
+- **The keep-away was a range, not an approach.** Every one of these events puts
+  its nearest pair two to six metres away *by design* — the ranks start at four —
+  and the leave test asked "is anything within seven metres". It was already true
+  on the frame it fired, so every ritual in the game was cut off at 0.9 s
+  regardless of what the player did. The swarm anomaly had precisely this bug and
+  was fixed; the rituals never were. It now measures how far you have **closed**
+  on the nearest of them (2.6 m, or 1.7 for the chapel pair). Measured standing
+  still: **97 of 100 run to completion**. Walking at them: **0 of 60**, broken at
+  about a second, which is what the rule was always supposed to say.
+
+And one authored beat that had never once been seen: the **chapel plinth is a
+solid cell**, so `add()` rejected it every time and the altar silently fell
+through to the random scatter. The pair now sits at the foot of the plinth, on
+whichever side you are standing.
 
 At full grace the building puts down a **door**, using the same machinery that
 gave you the pistol: out of your view cone, close, escalating cues, and a
@@ -648,9 +822,98 @@ fact: the fog is no longer holding the picture in.
 
 The ground is the other half of it, and probably the more important half, because
 the floor is the surface you are looking at the whole time: wet earth, dead grass
-in clumps, and standing water in the hollows carried in the texture's **alpha**
-channel, which the floor pass mixes toward the colour of the sky overhead. Puddles
-are the only place below the horizon where the sky appears.
+in clumps, and standing water in the ruts carried in the texture's **alpha**
+channel.
+
+#### The field
+
+That texture tiles every four cells, which is correct indoors, where the furthest
+thing you can see is twenty-six units into fog. Outside the view runs to
+seventy-four and the ground goes to the horizon, so twelve metres of period
+repeats eighteen times between your boots and the treeline — visibly, in rows,
+like tiled lino. A plane with one texture on it is also just a plane: the first
+version of this ending was a flat field, and a flat field is the one thing the
+outside cannot be, because the whole point of it is that it is not a corridor.
+
+So there is a **height field** now (`terrain.js`), and three things ask it: the
+texture baker, the world, and the scatterer. It is deliberately unseeded — every
+other surface is reseeded per session because the building is different every
+time, and the outside is one hand-built place that is always the same place.
+
+- **Flat is a feature, not a limitation.** The floor is cast affinely from a
+  single plane and nothing can raise it. So the relief is entirely *lit*, never
+  built: the gradient of the field is shaded from the same quarter of the sky the
+  dawn glow comes from, and the eye fills in ground that is not there. It works
+  because the fiction is never contradicted — the amplitude is under a metre and
+  a half over twenty-metre wavelengths, which is exactly the range where you
+  cannot tell.
+- **And the first attempt at that was invisible**, for a reason that is obvious
+  afterwards: a metre of rise over sixty is a slope of one degree, and one degree
+  of lambert is half a per cent of brightness. Fields do not read as ground
+  because of their hills, they read because of their **ruts**. There is a second,
+  much finer relief field — ten to thirty centimetres over two or three metres —
+  that is shaded and does *not* feed the water, because water finds contours tens
+  of metres across and a metres-wide wobble would speckle every shoreline in the
+  region with puddles the size of a bath. The shape that holds water and the
+  shape that catches light are two different fields.
+- **Water is the one kind of terrain a flat-plane renderer can draw honestly**,
+  because real water is also flat. There is a stream — the one authored feature —
+  crossing your path at about nineteen cells out, pinching to a channel and
+  swelling into pools along its length, plus whatever hollows past the fall are
+  deep enough to catch it. About a fifth of the field; the other four fifths are
+  what make that fifth legible as water at all. The first draft had the rolling
+  ground swinging a full metre either way with nothing lifting it, and half of
+  everything in sight came out flooded, the stream vanished into the general
+  wet, and you walked out of the door directly into it.
+- **It reflects, properly.** For a mirror at z = 0 the elevation of the reflected
+  ray is exactly the depression of the screen row, so one row of the sky texture
+  answers a whole row of water and the painted treeline lands in the flood upside
+  down. Reflectance runs from 33% underfoot to nearly all of it at grazing, which
+  is Fresnel and is also why the far water is bright and the water at your feet
+  shows you its bottom. The riffle that stops it being a sheet of glass is the
+  ground texture's own noise — free, and the right noise, because the riffle *is*
+  the ground showing through.
+- **All of it is one 768 × 576 texture** stretched once over the region, sampled
+  by absolute position and unfiltered. A texel is 78 cm, which would band a smooth
+  gradient into visible squares — so rather than pay four fetches per floor pixel
+  for bilinear, the mottling is baked in at greater amplitude than one texel's
+  worth of gradient. Quantisation you cannot find because it is quieter than the
+  noise on top of it. Heights are baked into an array first and the shading is a
+  difference of that array; calling the field again per texel for a gradient
+  costs five times the whole bake.
+
+And things standing in it, with one rule: **nothing out here was put here.**
+Everything in the building is something a person left behind, and a cardboard box
+on the grass would make the ending a continuation of the building. So the field
+gets things that grew, things that fell over, and one fence — the only evidence in
+the whole ending that anybody ever owned this ground, and worth having for exactly
+that. They are also the only objects in the game taller than a ceiling, which is
+most of what sells the change.
+
+- Placed against the **height field**, not the map: rushes at the waterline,
+  boulders on a rise, and a drowned trunk where nothing living could stand, which
+  is the best thing out there because it gives the flood a scale.
+- The scatter is built **once into one flat array** and queried by distance. The
+  per-cell walk the building uses is right for an eleven-cell draw radius and is
+  nine thousand map lookups a frame at this one.
+- **The far treeline stays painted** and always will. What the real ones are for
+  is *parallax*, the one cue a painted horizon cannot give: three real trees
+  between you and the line tell the eye the line is half a mile away. Thirty of
+  them tell it you are in a wood, which is a different ending. Small things get
+  much shorter radii than trees — grass at fourteen cells is already one pixel,
+  and without those culls most of the draw list is tussocks contributing a pixel
+  each.
+- **The distant tree is fatter than the near one**, which looks wrong written
+  down. A trunk drawn at its true width a hundred metres off is a one-pixel
+  vertical line, and a one-pixel vertical dark line against a pale sky is exactly
+  what the chromatic split in the post chain does its worst work on: the first
+  version came out with a row of green and magenta sticks along the horizon. The
+  fence had the same problem for the same reason and was moved from thirty-one
+  cells out to twelve, where you go through it rather than look at it.
+- And **the ground answers your feet**. Standing water is the only surface in the
+  game that makes a sound of its own, and after nine minutes of carpet a splash
+  is the field replying to you — which it can afford to be, because unlike
+  everything else that has made a noise at you, the field does not want anything.
 
 Two things that only showed up on screen:
 
@@ -673,9 +936,24 @@ seconds and the card comes up out of the white. It is the only white cut in a
 game where everything else ends in black, and the card is pale with dark type for
 the same reason.
 
-Measured on the frames above: **3.1 ms median outside against 7.3 ms inside**.
-It is cheaper out there — no props, no ceiling cast, and most rays never hit
-anything.
+Measured on the frames above: **3.6 ms median outside against 7.4 ms inside**,
+with sixty to a hundred field objects and 1,000–1,700 faces in shot. It is still
+cheaper out there even carrying a landscape: no ceiling cast, and most rays never
+hit anything.
+
+### How long ending vi takes
+
+Measured with a bot that walks the building on a wandering path and stops for
+eight seconds whenever a ritual fires, which is roughly the informed player and
+a good deal worse at exploring than a real one:
+
+| | door appears |
+|---|---|
+| stops for rituals | **5.2, 5.7, 6.3 min** across three seeds |
+| identical path, never stops | never — grace stays at **0** |
+
+That second row is the whole point, and it is the same seed and the same route as
+the first: this is not a thing you stumble into.
 
 ### How things leave
 
@@ -750,7 +1028,51 @@ you and it.
   lattice of the combs filling in, and one pair on the chapel plinth that waits
   for you to come closer rather than for a timer. A room you recognise should
   not be a safe room. (`LANDMARK_EVENTS` in `config.js`.)
+
+  **They aim now, and they wait.** The first version built one formation, then
+  deleted every pair it could not see from where you happened to be standing —
+  which threw away exactly the eyes a formation exists to place *behind* you (the
+  far half of the atrium ring is on the other side of the core it is drawn
+  around) — and if fewer than two survived it discarded the room's shape
+  entirely and scattered the same number of pairs at random bearings. So the two
+  best events in the game were the two most likely to arrive as confetti, and
+  the ward's twelve pairs routinely arrived as three. Three separate faults
+  behind it: the combs' lattice used a 4-cell pitch, which is precisely the
+  pitch of its own pillar array, so every grid point was inside a pillar; the
+  chapel's single pair went on the side of the plinth you were *standing* on,
+  which is behind you as often as not; and the shaft's variant search took the
+  first fully-visible formation it built, which was always the narrow one that
+  found a single hole.
+
+  Placement is now authored and only wall-tested — what you can *see* is the
+  renderer's business, since it depth-tests billboards like everything else —
+  and the director measures visibility only when deciding **when to fire**. It
+  builds four candidate orientations, counts how many pairs land in your view
+  cone, and either fires the best one or waits: the room gets six seconds of
+  patience to catch you looking the right way, and it does not spend itself
+  until it has. Walk out before it fires and it un-arms silently, unburned, and
+  is still there next time. Measured across five seeds, from every open cell in
+  every landmark, with the player turning at a casual 0.9 rad/s:
+
+  | | fires | while you are looking | pairs placed |
+  |---|---|---|---|
+  | atrium | 100% | 100% | 10.0 of 10 |
+  | shaft | 100% | 100% | 2.2 |
+  | ward | 100% | 84% | 9.2 of 12 |
+  | chapel | 100% | 80% | 1 of 1 |
+  | combs | 100% | 94% | 6.9 of 8 |
+
+  Out of patience, the room fires *in the place the room wanted it* rather than
+  scattering — an altar at the foot of the plinth behind you is still an altar,
+  the cue plays, and you have the rest of its life to turn round. The scatter
+  survives only for the case where the template could not place anything at all.
+  Redshift also lost its dread gate for ritual omens: it was gated at 0.30 as a
+  random anomaly, and landmark rituals are the earliest authored thing that
+  happens to you, so the colour meant to teach "something is about to happen
+  here" was silent for exactly the events that would have taught it.
 - **Phantom footsteps** approach from behind, and stop the instant you turn.
+  Some cross your path and continue toward an unvisited landmark, using the same
+  diegetic guide that leads to a missed pistol.
 - **Lights flicker** in a stutter, then settle and die back to dark.
 - **Distant eyes** open at the far end of whatever you can see down. This used
   to demand a clear eighteen-metre sightline, which the old open map had all
@@ -767,14 +1089,16 @@ you and it.
     charge warnings disappear, but a missed shot cannot schedule a second
     answer or hurry a hunter that is already present
   - *swarm* — a dozen pairs of eyes open in a directional wave: the last,
-    largest pair marks the gun, a reserved hunter arrival, or whatever is
-    already following you
+    largest pair marks the gun, a reserved hunter arrival, whatever is already
+    following you, or (as its final fallback) the nearest unused landmark
   - *redshift* — the place turns arterial shortly before a hunter arrives or
     charges, or before a landmark ritual fires; it is never selected randomly
   - *blackout* — the torch simply stops, and the creature reliably arrives
     while it is off
   - *crowd* — the ceiling lights reveal ranks lining a real walkable route
-    toward the unfound gun or an unused landmark. The centre aisle is safe.
+    toward the unfound gun or a landmark within forty-eight cells. A room may be
+    reused, so exploring nearby rituals no longer removes the congregation from
+    the anomaly bag. The centre aisle is safe.
     One person-sized place in a ritual-bound rank is empty; deliberately
     standing beneath its single working ceiling panel and facing with them
     produces **the congregation** ending

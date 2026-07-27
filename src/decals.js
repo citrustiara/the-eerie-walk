@@ -40,11 +40,15 @@ const MAX_CACHED = 220;
 export class BloodDecals {
   constructor() { this.cache = new Map(); }
 
-  get(cx, cy, face = 0) {
+  // `style` is { kind, age } when the wall belongs to a room that was built on
+  // purpose and therefore knows what happened against it — see
+  // world.bloodWallStyle. Null everywhere else, which rolls from the weights
+  // below exactly as it always did.
+  get(cx, cy, face = 0, style = null) {
     const key = cx + ',' + cy + ',' + face;
     let d = this.cache.get(key);
     if (!d) {
-      d = this._make(cx, cy, face);
+      d = this._make(cx, cy, face, style);
       if (this.cache.size >= MAX_CACHED) {
         // Map iterates in insertion order, so the first key is the oldest.
         this.cache.delete(this.cache.keys().next().value);
@@ -277,7 +281,7 @@ export class BloodDecals {
 
   // --- assembly -------------------------------------------------------------
 
-  _make(cx, cy, face) {
+  _make(cx, cy, face, style = null) {
     const seed = (((hash2(cx * 131 + cy * 53, cy * 97 + cx * 29) * 4294967296) >>> 0) ^
       0x9e3779b9 ^ Math.imul(face + 1, 0x85ebca6b)) >>> 0;
     const rng = makeRng(seed);
@@ -285,11 +289,13 @@ export class BloodDecals {
     const field = new Float32Array(DS * DS);
     const kinds = ['impact', 'spray', 'drag', 'handprints', 'soak', 'tally'];
     // Weighted so the mundane ones dominate and a tally wall is a real find.
+    // A landmark does not roll: its walls record the one event that room was
+    // for, which is what makes a tally mean "the chapel" rather than "a wall".
     const weights = [5, 4, 4, 4, 3, 1];
     let total = 0; for (const w of weights) total += w;
     let roll = rng() * total, pick = 0;
     while (roll > weights[pick]) { roll -= weights[pick]; pick++; }
-    const kind = kinds[pick];
+    const kind = style && kinds.includes(style.kind) ? style.kind : kinds[pick];
 
     ({
       impact: () => this._impact(field, rng),
@@ -301,9 +307,12 @@ export class BloodDecals {
     })[kind]();
 
     // A second, older event on the same wall — layering is what makes a place
-    // feel used rather than dressed.
+    // feel used rather than dressed. A landmark layers its own kind under
+    // itself: a ward wall that was held on to twice is a ward wall, and one that
+    // was held on to and then also sprayed is a wall in a game about nothing in
+    // particular.
     if (rng() > 0.62) {
-      const second = kinds[(rng() * 5) | 0];
+      const second = style ? kind : kinds[(rng() * 5) | 0];
       const old = new Float32Array(DS * DS);
       ({
         impact: () => this._impact(old, rng),
@@ -319,7 +328,9 @@ export class BloodDecals {
       }
     }
 
-    const age = rng();           // 0 = fresh and wet, 1 = old, brown, flaking
+    // 0 = fresh and wet, 1 = old, brown, flaking. A landmark authors its own:
+    // the chapel's counting stopped a long time ago, the ward's did not.
+    const age = style ? clamp(style.age, 0, 1) : rng();
     return { data: this._resolve(field, age, seed), kind, age };
   }
 

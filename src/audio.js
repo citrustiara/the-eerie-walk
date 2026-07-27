@@ -13,6 +13,26 @@
 
 import { AUDIO } from './config.js';
 
+// StereoPanner carries left/right information only: sin(0) and sin(PI) are both
+// zero, so a source directly ahead and one directly behind otherwise collapse to
+// the same signal. Keep the signed relative bearing and add the spectral/level
+// part of the head shadow here. This is pure so the balance harness can verify
+// the graph without constructing an AudioContext.
+export function spatialProfile(rel, baseSend = 0.2) {
+  if (!Number.isFinite(rel)) {
+    return { back: 0, cutoff: 20000, gain: 1, send: baseSend };
+  }
+  const back = (1 - Math.cos(rel)) * 0.5;
+  return {
+    back,
+    // Exponential interpolation sounds like a filter turning rather than a
+    // linear sweep. Directly behind lands at the intended ~1.6 kHz.
+    cutoff: 16000 * Math.pow(0.1, back),
+    gain: 1.04 - back * 0.24,
+    send: baseSend * (1 + back * 0.55),
+  };
+}
+
 export class AudioEngine {
   constructor() {
     this.ctx = null;
@@ -22,6 +42,7 @@ export class AudioEngine {
     this._nextBreath = 0;
     this.breath = 0;         // 0..1 creature breathing loudness
     this.breathPan = 0;
+    this.breathRel = null;
     this.wind = null;        // only ever built once you are through the door
     this.humSilenced = false;
   }
@@ -79,13 +100,37 @@ export class AudioEngine {
     return buf;
   }
 
-  // Shared plumbing for a one-shot: source -> filter -> gain -> pan -> out.
-  _voice({ buffer, rate = 1, loop = false, type, freq, Q = 1, pan = 0, send = 0.2 }) {
+  // One spatial output for every world-positioned sound. Its local low-pass is
+  // upstream of `master`, so the silence anomaly's master muffle remains the
+  // final authority: during silence the two filters simply cascade.
+  _spatial(pan = 0, rel = null, send = 0.2) {
+    const ctx = this.ctx;
+    const profile = spatialProfile(rel, send);
+    const panner = ctx.createStereoPanner();
+    panner.pan.value = Math.max(-1, Math.min(1, pan));
+    const lowpass = ctx.createBiquadFilter();
+    lowpass.type = 'lowpass';
+    lowpass.frequency.value = profile.cutoff;
+    lowpass.Q.value = 0.55;
+    const gain = ctx.createGain();
+    gain.gain.value = profile.gain;
+    panner.connect(lowpass).connect(gain).connect(this.master);
+    let reverbSend = null;
+    if (profile.send > 0) {
+      reverbSend = ctx.createGain();
+      reverbSend.gain.value = profile.send;
+      gain.connect(reverbSend).connect(this.reverb);
+    }
+    return { panner, lowpass, gain, reverbSend, profile };
+  }
+
+  // Shared plumbing for a one-shot: source -> filter -> gain -> spatial out.
+  _voice({ buffer, rate = 1, loop = false, type, freq, Q = 1,
+           pan = 0, rel = null, send = 0.2 }) {
     const ctx = this.ctx;
     const g = ctx.createGain();
     g.gain.value = 0;
-    const panner = ctx.createStereoPanner();
-    panner.pan.value = pan;
+    const spatial = this._spatial(pan, rel, send);
     let src;
     if (buffer) {
       src = ctx.createBufferSource();
@@ -106,13 +151,10 @@ export class AudioEngine {
       filter.Q.value = Q;
       node = src.connect(filter);
     }
-    node.connect(g).connect(panner);
-    panner.connect(this.master);
-    if (send > 0) {
-      const s = ctx.createGain(); s.gain.value = send;
-      panner.connect(s).connect(this.reverb);
-    }
-    return { src, g, filter, panner, t: ctx.currentTime };
+    node.connect(g).connect(spatial.panner);
+    return {
+      src, g, filter, panner: spatial.panner, spatial, t: ctx.currentTime,
+    };
   }
 
   _buildHum() {
@@ -167,13 +209,17 @@ export class AudioEngine {
     }
 
     if (this.breath > 0.02 && t >= this._nextBreath) {
-      this._breathIn(this.breath, this.breathPan);
+      this._breathIn(this.breath, this.breathPan, this.breathRel);
       this._nextBreath = t + 1.5 + Math.random() * 1.4;
     }
   }
 
   setHeartbeat(k) { this.heart = k; }
-  setBreath(k, pan = 0) { this.breath = k; this.breathPan = pan; }
+  setBreath(k, pan = 0, rel = null) {
+    this.breath = k;
+    this.breathPan = pan;
+    this.breathRel = rel;
+  }
 
   duck(target, time = 0.4) {
     if (!this.started) return;
@@ -250,7 +296,7 @@ export class AudioEngine {
 
   // Air moving in a hole in the floor. Wide, slow, tuned low enough that you
   // feel where it is coming from before you work out what it is.
-  playPitDraft(pan = 0, volume = 0.2) {
+  playPitDraft(pan = 0, volume = 0.2, rel = null) {
     if (!this.started) return;
     const ctx = this.ctx, t = ctx.currentTime;
     const src = ctx.createBufferSource(); src.buffer = this._longNoise; src.loop = true;
@@ -259,10 +305,8 @@ export class AudioEngine {
     bp.frequency.setValueAtTime(150, t);
     bp.frequency.linearRampToValueAtTime(70, t + 2.6);
     const g = ctx.createGain(); g.gain.value = 0;
-    const p = ctx.createStereoPanner(); p.pan.value = pan;
-    src.connect(bp).connect(g).connect(p).connect(this.master);
-    const send = ctx.createGain(); send.gain.value = 0.7;
-    p.connect(send).connect(this.reverb);
+    const spatial = this._spatial(pan, rel, 0.7);
+    src.connect(bp).connect(g).connect(spatial.panner);
     g.gain.setValueAtTime(0.0001, t);
     g.gain.linearRampToValueAtTime(volume, t + 0.9);
     g.gain.linearRampToValueAtTime(0.0001, t + 2.9);
@@ -273,7 +317,7 @@ export class AudioEngine {
   // lower; this comes toward you and opens up, because the whole tell is that
   // the air is moving the wrong way for a sealed building. Same trick as the
   // pistol's clink: you cannot see it turn up, so you get to hear it.
-  playDraught(pan = 0, volume = 0.22) {
+  playDraught(pan = 0, volume = 0.22, rel = null) {
     if (!this.started) return;
     const ctx = this.ctx, t = ctx.currentTime;
     const src = ctx.createBufferSource(); src.buffer = this._longNoise; src.loop = true;
@@ -283,10 +327,8 @@ export class AudioEngine {
     bp.frequency.exponentialRampToValueAtTime(620, t + 1.8);
     bp.frequency.exponentialRampToValueAtTime(240, t + 3.4);
     const g = ctx.createGain(); g.gain.value = 0;
-    const p = ctx.createStereoPanner(); p.pan.value = pan;
-    src.connect(bp).connect(g).connect(p).connect(this.master);
-    const send = ctx.createGain(); send.gain.value = 0.5;
-    p.connect(send).connect(this.reverb);
+    const spatial = this._spatial(pan, rel, 0.5);
+    src.connect(bp).connect(g).connect(spatial.panner);
     g.gain.setValueAtTime(0.0001, t);
     g.gain.linearRampToValueAtTime(volume, t + 1.1);
     g.gain.linearRampToValueAtTime(0.0001, t + 3.5);
@@ -449,22 +491,30 @@ export class AudioEngine {
 
   // --- one-shots ------------------------------------------------------------
   // Generic footstep: layered low thud + high scuff with a fast envelope.
-  playFootstep({ pan = 0, volume = AUDIO.footstepVolume, muffled = false, reverbSend = 0.15 } = {}) {
+  playFootstep({
+    pan = 0, rel = null, volume = AUDIO.footstepVolume,
+    muffled = false, reverbSend = 0.15, wet = false,
+  } = {}) {
     if (!this.started) return;
     const ctx = this.ctx, t = ctx.currentTime;
     const src = ctx.createBufferSource(); src.buffer = this._noise;
     src.playbackRate.value = 0.8 + Math.random() * 0.3;
 
+    // Standing water. Nine minutes of carpet and then this, and it is the only
+    // sound in the game that is generated by the GROUND rather than by
+    // something that wants you: a splash is the field answering your feet, and
+    // the field does not want anything.
+    if (wet) this._splash(volume, pan, rel);
+
     const lp = ctx.createBiquadFilter();
     lp.type = 'lowpass';
-    lp.frequency.value = muffled ? 420 : 1300;
+    // Leave enough scuff above 1.6 kHz for the rear head-shadow filter to have
+    // something to remove. Phantom steps retain their deliberately veiled body.
+    lp.frequency.value = muffled ? 700 : wet ? 5200 : 3600;
 
     const g = ctx.createGain();
-    const panner = ctx.createStereoPanner(); panner.pan.value = pan;
-    src.connect(lp).connect(g).connect(panner);
-    panner.connect(this.master);
-    const send = ctx.createGain(); send.gain.value = reverbSend;
-    panner.connect(send).connect(this.reverb);
+    const spatial = this._spatial(pan, rel, reverbSend);
+    src.connect(lp).connect(g).connect(spatial.panner);
 
     g.gain.setValueAtTime(0.0001, t);
     g.gain.exponentialRampToValueAtTime(Math.max(0.0002, volume), t + 0.006);
@@ -472,23 +522,43 @@ export class AudioEngine {
     src.start(t); src.stop(t + 0.3);
   }
 
+  // The water going up and coming back down. Bandpassed noise with a fast
+  // attack and a tail about three times the length of the step under it, which
+  // is what stops a splash sounding like a footstep with the treble left on.
+  _splash(volume, pan, rel) {
+    const ctx = this.ctx, t = ctx.currentTime;
+    const src = ctx.createBufferSource(); src.buffer = this._noise;
+    src.playbackRate.value = 1.1 + Math.random() * 0.5;
+    const bp = ctx.createBiquadFilter();
+    bp.type = 'bandpass';
+    bp.frequency.setValueAtTime(1500 + Math.random() * 700, t);
+    // Falling, because the fine spray dies before the body of it does.
+    bp.frequency.exponentialRampToValueAtTime(620, t + 0.30);
+    bp.Q.value = 0.7;
+    const g = ctx.createGain();
+    src.connect(bp).connect(g).connect(this._spatial(pan, rel, 0.25).panner);
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(Math.max(0.0002, volume * 0.75), t + 0.010);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + 0.42);
+    src.start(t); src.stop(t + 0.5);
+  }
+
   // Phantom step: muffled, reverberant, panned — meant to sit behind you.
-  playPhantomStep(pan, volume) {
-    this.playFootstep({ pan, volume, muffled: true, reverbSend: 0.5 });
+  playPhantomStep(pan, volume, rel = null) {
+    this.playFootstep({ pan, rel, volume, muffled: true, reverbSend: 0.5 });
   }
 
   // The creature's own footfall: a heavy, wet, bone-on-carpet impact.
-  playCreatureStep(pan, volume) {
+  playCreatureStep(pan, volume, rel = null) {
     if (!this.started) return;
     const ctx = this.ctx, t = ctx.currentTime;
-    this._thump(volume * 0.9, 46, pan);
+    this._thump(volume * 0.9, 46, pan, rel);
     const src = ctx.createBufferSource(); src.buffer = this._noise;
     src.playbackRate.value = 0.5;
-    const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 900;
+    const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 3200;
     const g = ctx.createGain(); g.gain.value = 0;
-    const p = ctx.createStereoPanner(); p.pan.value = pan;
-    src.connect(lp).connect(g).connect(p).connect(this.master);
-    const s = ctx.createGain(); s.gain.value = 0.55; p.connect(s).connect(this.reverb);
+    const spatial = this._spatial(pan, rel, 0.55);
+    src.connect(lp).connect(g).connect(spatial.panner);
     g.gain.setValueAtTime(0.0001, t);
     g.gain.exponentialRampToValueAtTime(Math.max(0.0002, volume * 0.7), t + 0.01);
     g.gain.exponentialRampToValueAtTime(0.0001, t + 0.3);
@@ -497,15 +567,15 @@ export class AudioEngine {
 
   // A low body-thump. The heartbeat, the creature's steps and the gun's punch
   // all sit on one of these.
-  _thump(volume, freq = 62, pan = 0) {
+  _thump(volume, freq = 62, pan = 0, rel = null) {
     if (!this.started) return;
     const ctx = this.ctx, t = ctx.currentTime;
     const o = ctx.createOscillator(); o.type = 'sine';
     o.frequency.setValueAtTime(freq, t);
     o.frequency.exponentialRampToValueAtTime(freq * 0.45, t + 0.14);
     const g = ctx.createGain(); g.gain.value = 0;
-    const p = ctx.createStereoPanner(); p.pan.value = pan;
-    o.connect(g).connect(p).connect(this.master);
+    const spatial = this._spatial(pan, rel, 0);
+    o.connect(g).connect(spatial.panner);
     g.gain.setValueAtTime(0.0001, t);
     g.gain.exponentialRampToValueAtTime(Math.max(0.0002, volume), t + 0.012);
     g.gain.exponentialRampToValueAtTime(0.0001, t + 0.30);
@@ -514,7 +584,7 @@ export class AudioEngine {
 
   // Wet inhale-exhale. Played on a loose timer whenever the creature is near
   // enough to hear, panned to its bearing — you hear it before you see it.
-  _breathIn(volume, pan) {
+  _breathIn(volume, pan, rel = null) {
     if (!this.started) return;
     const ctx = this.ctx, t = ctx.currentTime;
     const mk = (start, dur, f0, f1, vol) => {
@@ -524,9 +594,8 @@ export class AudioEngine {
       bp.frequency.setValueAtTime(f0, t + start);
       bp.frequency.exponentialRampToValueAtTime(f1, t + start + dur);
       const g = ctx.createGain(); g.gain.value = 0;
-      const p = ctx.createStereoPanner(); p.pan.value = pan;
-      src.connect(bp).connect(g).connect(p).connect(this.master);
-      const s = ctx.createGain(); s.gain.value = 0.5; p.connect(s).connect(this.reverb);
+      const spatial = this._spatial(pan, rel, 0.5);
+      src.connect(bp).connect(g).connect(spatial.panner);
       g.gain.setValueAtTime(0.0001, t + start);
       g.gain.linearRampToValueAtTime(vol, t + start + dur * 0.45);
       g.gain.linearRampToValueAtTime(0.0001, t + start + dur);
@@ -545,7 +614,7 @@ export class AudioEngine {
   // all, just a sub-bass drop under an inhale-shaped band of noise falling out
   // of the top of your hearing, and then a hole in the mix where the room used
   // to be. It sounds like pressure leaving, not like a creature.
-  playVanish(volume = 0.55, pan = 0) {
+  playVanish(volume = 0.55, pan = 0, rel = null) {
     if (!this.started) return;
     const ctx = this.ctx, t = ctx.currentTime;
 
@@ -568,10 +637,8 @@ export class AudioEngine {
     bp.frequency.setValueAtTime(1700, t);
     bp.frequency.exponentialRampToValueAtTime(115, t + 0.52);
     const ag = ctx.createGain(); ag.gain.value = 0;
-    const p = ctx.createStereoPanner(); p.pan.value = pan;
-    air.connect(bp).connect(ag).connect(p).connect(this.master);
-    const send = ctx.createGain(); send.gain.value = 0.85;
-    p.connect(send).connect(this.reverb);
+    const spatial = this._spatial(pan, rel, 0.85);
+    air.connect(bp).connect(ag).connect(spatial.panner);
     ag.gain.setValueAtTime(0.0001, t);
     ag.gain.linearRampToValueAtTime(volume * 0.8, t + 0.03);
     ag.gain.exponentialRampToValueAtTime(0.0001, t + 0.6);
@@ -584,16 +651,14 @@ export class AudioEngine {
   // Something a long way off has answered. Low, slow, and heard through walls —
   // the point is that you cannot tell how far away it is or what made it, only
   // that it was not there a second ago.
-  playDistantCall(volume = 0.4, pan = 0) {
+  playDistantCall(volume = 0.4, pan = 0, rel = null) {
     if (!this.started) return;
     const ctx = this.ctx, t = ctx.currentTime;
     const g = ctx.createGain(); g.gain.value = 0;
     const lp = ctx.createBiquadFilter(); lp.type = 'lowpass';
     lp.frequency.value = 340; lp.Q.value = 0.6;
-    const p = ctx.createStereoPanner(); p.pan.value = pan;
-    g.connect(lp).connect(p).connect(this.master);
-    const send = ctx.createGain(); send.gain.value = 1.0;
-    p.connect(send).connect(this.reverb);
+    const spatial = this._spatial(pan, rel, 1.0);
+    g.connect(lp).connect(spatial.panner);
 
     // Two nearly-unison partials with slow independent drift, so it beats
     // against itself instead of sitting on a note.
@@ -641,20 +706,17 @@ export class AudioEngine {
   // Its footfall. Much heavier and much lower than the creature's, with a drag
   // on the tail, and it carries three times as far — hearing it start is meant
   // to happen well before seeing it.
-  playHunterStep(pan = 0, volume = 0.4) {
+  playHunterStep(pan = 0, volume = 0.4, rel = null, reverbSend = 0.75) {
     if (!this.started) return;
     const ctx = this.ctx, t = ctx.currentTime;
-    const p = ctx.createStereoPanner(); p.pan.value = pan;
-    p.connect(this.master);
-    const send = ctx.createGain(); send.gain.value = 0.75;
-    p.connect(send).connect(this.reverb);
+    const spatial = this._spatial(pan, rel, reverbSend);
 
     // The impact: a short sine drop, felt in the floor.
     const o = ctx.createOscillator(); o.type = 'sine';
     o.frequency.setValueAtTime(78, t);
     o.frequency.exponentialRampToValueAtTime(31, t + 0.16);
     const og = ctx.createGain(); og.gain.value = 0;
-    o.connect(og).connect(p);
+    o.connect(og).connect(spatial.panner);
     og.gain.setValueAtTime(0.0001, t);
     og.gain.linearRampToValueAtTime(volume, t + 0.006);
     og.gain.exponentialRampToValueAtTime(0.0001, t + 0.34);
@@ -667,22 +729,28 @@ export class AudioEngine {
     bp.frequency.setValueAtTime(520, t + 0.05); bp.Q.value = 0.9;
     bp.frequency.exponentialRampToValueAtTime(180, t + 0.32);
     const ng = ctx.createGain(); ng.gain.value = 0;
-    src.connect(bp).connect(ng).connect(p);
+    src.connect(bp).connect(ng).connect(spatial.panner);
+    // A faint dry scrape supplies the high-frequency edge that the rear
+    // low-pass can take away. The old all-sub signal could only get quieter;
+    // filtering it at 1.6 kHz was otherwise effectively a no-op.
+    const hp = ctx.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 1800;
+    const scrape = ctx.createGain(); scrape.gain.value = 0;
+    src.connect(hp).connect(scrape).connect(spatial.panner);
     ng.gain.setValueAtTime(0.0001, t + 0.05);
     ng.gain.linearRampToValueAtTime(volume * 0.32, t + 0.10);
     ng.gain.exponentialRampToValueAtTime(0.0001, t + 0.36);
+    scrape.gain.setValueAtTime(0.0001, t + 0.05);
+    scrape.gain.linearRampToValueAtTime(volume * 0.08, t + 0.08);
+    scrape.gain.exponentialRampToValueAtTime(0.0001, t + 0.24);
     src.start(t); src.stop(t + 0.45);
   }
 
   // It has arrived, and it wants you to know. A long rising swell that never
   // quite becomes a note — two sub partials sliding up under a band of breath.
-  playHunterCall(volume = 0.6, pan = 0) {
+  playHunterCall(volume = 0.6, pan = 0, rel = null) {
     if (!this.started) return;
     const ctx = this.ctx, t = ctx.currentTime;
-    const p = ctx.createStereoPanner(); p.pan.value = pan;
-    p.connect(this.master);
-    const send = ctx.createGain(); send.gain.value = 0.9;
-    p.connect(send).connect(this.reverb);
+    const spatial = this._spatial(pan, rel, 0.9);
 
     for (const [f0, f1, amp, type] of [[41, 63, 0.62, 'sine'], [58, 94, 0.34, 'triangle']]) {
       const o = ctx.createOscillator(); o.type = type;
@@ -690,7 +758,7 @@ export class AudioEngine {
       o.frequency.exponentialRampToValueAtTime(f1, t + 1.5);
       o.frequency.exponentialRampToValueAtTime(f0 * 0.72, t + 2.4);
       const g = ctx.createGain(); g.gain.value = 0;
-      o.connect(g).connect(p);
+      o.connect(g).connect(spatial.panner);
       g.gain.setValueAtTime(0.0001, t);
       g.gain.linearRampToValueAtTime(volume * amp, t + 0.7);
       g.gain.exponentialRampToValueAtTime(0.0001, t + 2.5);
@@ -704,7 +772,7 @@ export class AudioEngine {
     bp.frequency.exponentialRampToValueAtTime(880, t + 1.2);
     bp.frequency.exponentialRampToValueAtTime(160, t + 2.4);
     const ng = ctx.createGain(); ng.gain.value = 0;
-    src.connect(bp).connect(ng).connect(p);
+    src.connect(bp).connect(ng).connect(spatial.panner);
     ng.gain.setValueAtTime(0.0001, t);
     ng.gain.linearRampToValueAtTime(volume * 0.30, t + 0.9);
     ng.gain.exponentialRampToValueAtTime(0.0001, t + 2.4);
@@ -871,17 +939,16 @@ export class AudioEngine {
   }
 
   // Hurt, not killed. A short, wet grunt with a bone crack on top.
-  playCreatureHit(pan = 0) {
+  playCreatureHit(pan = 0, rel = null) {
     if (!this.started) return;
     const ctx = this.ctx, t = ctx.currentTime;
-    this._thump(0.3, 120, pan);
+    this._thump(0.3, 120, pan, rel);
     const src = ctx.createBufferSource(); src.buffer = this._noise;
     src.playbackRate.value = 0.45;
     const bp = ctx.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = 420; bp.Q.value = 1.4;
     const g = ctx.createGain(); g.gain.value = 0;
-    const p = ctx.createStereoPanner(); p.pan.value = pan;
-    src.connect(bp).connect(g).connect(p).connect(this.master);
-    const s = ctx.createGain(); s.gain.value = 0.5; p.connect(s).connect(this.reverb);
+    const spatial = this._spatial(pan, rel, 0.5);
+    src.connect(bp).connect(g).connect(spatial.panner);
     g.gain.setValueAtTime(0.0001, t);
     g.gain.exponentialRampToValueAtTime(0.34, t + 0.01);
     g.gain.exponentialRampToValueAtTime(0.0001, t + 0.42);
@@ -955,7 +1022,7 @@ export class AudioEngine {
   }
 
   // Brass on concrete, a beat after the shot.
-  playShellDrop(pan = 0.25) {
+  playShellDrop(pan = 0.25, rel = null) {
     if (!this.started) return;
     const ctx = this.ctx;
     for (let i = 0; i < 3; i++) {
@@ -964,9 +1031,8 @@ export class AudioEngine {
       const o = ctx.createOscillator(); o.type = 'triangle';
       o.frequency.value = 2400 + Math.random() * 1600;
       const g = ctx.createGain(); g.gain.value = 0;
-      const p = ctx.createStereoPanner(); p.pan.value = pan;
-      o.connect(g).connect(p).connect(this.master);
-      const s = ctx.createGain(); s.gain.value = 0.35; p.connect(s).connect(this.reverb);
+      const spatial = this._spatial(pan, rel, 0.35);
+      o.connect(g).connect(spatial.panner);
       g.gain.setValueAtTime(0.0001, t);
       g.gain.exponentialRampToValueAtTime(0.05 / (i + 1), t + 0.002);
       g.gain.exponentialRampToValueAtTime(0.0001, t + 0.09);
@@ -975,7 +1041,7 @@ export class AudioEngine {
   }
 
   // Round into drywall: a dull slap plus a little grit falling.
-  playBulletImpact(pan = 0, dist = 4) {
+  playBulletImpact(pan = 0, dist = 4, rel = null) {
     if (!this.started) return;
     const ctx = this.ctx, t = ctx.currentTime + Math.min(0.09, dist * 0.003);
     const vol = 0.24 / (1 + dist * 0.12);
@@ -983,9 +1049,8 @@ export class AudioEngine {
     src.playbackRate.value = 1.3;
     const bp = ctx.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = 1100; bp.Q.value = 1.2;
     const g = ctx.createGain(); g.gain.value = 0;
-    const p = ctx.createStereoPanner(); p.pan.value = pan;
-    src.connect(bp).connect(g).connect(p).connect(this.master);
-    const s = ctx.createGain(); s.gain.value = 0.6; p.connect(s).connect(this.reverb);
+    const spatial = this._spatial(pan, rel, 0.6);
+    src.connect(bp).connect(g).connect(spatial.panner);
     g.gain.setValueAtTime(0.0001, t);
     g.gain.exponentialRampToValueAtTime(Math.max(0.0002, vol), t + 0.004);
     g.gain.exponentialRampToValueAtTime(0.0001, t + 0.18);
@@ -1029,7 +1094,7 @@ export class AudioEngine {
   // --- ambience one-shots ---------------------------------------------------
 
   // Breathy whisper: band-passed noise swell, panned, drenched in reverb.
-  playWhisper({ pan = 0, volume = 0.09 } = {}) {
+  playWhisper({ pan = 0, rel = null, volume = 0.09 } = {}) {
     if (!this.started) return;
     const ctx = this.ctx, t = ctx.currentTime;
     const src = ctx.createBufferSource(); src.buffer = this._longNoise; src.loop = true;
@@ -1038,11 +1103,8 @@ export class AudioEngine {
     bp.frequency.setValueAtTime(900, t);
     bp.frequency.linearRampToValueAtTime(1600, t + 1.4);
     const g = ctx.createGain(); g.gain.value = 0;
-    const panner = ctx.createStereoPanner(); panner.pan.value = pan;
-    src.connect(bp).connect(g).connect(panner);
-    panner.connect(this.master);
-    const send = ctx.createGain(); send.gain.value = 0.7;
-    panner.connect(send).connect(this.reverb);
+    const spatial = this._spatial(pan, rel, 0.7);
+    src.connect(bp).connect(g).connect(spatial.panner);
     g.gain.setValueAtTime(0.0001, t);
     g.gain.linearRampToValueAtTime(volume, t + 0.7);
     g.gain.linearRampToValueAtTime(0.0001, t + 1.8);
@@ -1050,14 +1112,14 @@ export class AudioEngine {
   }
 
   // Low sub-bass swell for anomalies — felt more than heard.
-  playDrone({ freq = 42, dur = 4, volume = 0.18 } = {}) {
+  playDrone({ freq = 42, dur = 4, volume = 0.18, pan = 0, rel = null } = {}) {
     if (!this.started) return;
     const ctx = this.ctx, t = ctx.currentTime;
     const o = ctx.createOscillator(); o.type = 'sine'; o.frequency.value = freq;
     const o2 = ctx.createOscillator(); o2.type = 'sine'; o2.frequency.value = freq * 1.005;
     const g = ctx.createGain(); g.gain.value = 0;
-    o.connect(g); o2.connect(g); g.connect(this.master);
-    const send = ctx.createGain(); send.gain.value = 0.4; g.connect(send).connect(this.reverb);
+    const spatial = this._spatial(pan, rel, 0.4);
+    o.connect(g); o2.connect(g); g.connect(spatial.panner);
     g.gain.setValueAtTime(0.0001, t);
     g.gain.linearRampToValueAtTime(volume, t + dur * 0.4);
     g.gain.linearRampToValueAtTime(0.0001, t + dur);
@@ -1065,25 +1127,24 @@ export class AudioEngine {
   }
 
   // Something heavy shut, a long way off, in a building with no doors.
-  playDistantBang(pan = 0) {
+  playDistantBang(pan = 0, rel = null) {
     if (!this.started) return;
     const ctx = this.ctx, t = ctx.currentTime;
     const src = ctx.createBufferSource(); src.buffer = this._noise;
     src.playbackRate.value = 0.4;
     const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 320;
     const g = ctx.createGain(); g.gain.value = 0;
-    const p = ctx.createStereoPanner(); p.pan.value = pan;
-    src.connect(lp).connect(g).connect(p).connect(this.master);
-    const s = ctx.createGain(); s.gain.value = 0.9; p.connect(s).connect(this.reverb);
+    const spatial = this._spatial(pan, rel, 0.9);
+    src.connect(lp).connect(g).connect(spatial.panner);
     g.gain.setValueAtTime(0.0001, t);
     g.gain.exponentialRampToValueAtTime(0.20, t + 0.006);
     g.gain.exponentialRampToValueAtTime(0.0001, t + 0.6);
     src.start(t); src.stop(t + 0.7);
-    this._thump(0.10, 44, pan);
+    this._thump(0.10, 44, pan, rel);
   }
 
   // A child laughing two rooms over. Used sparingly; it does not need help.
-  playChildLaugh(pan = 0) {
+  playChildLaugh(pan = 0, rel = null) {
     if (!this.started) return;
     const ctx = this.ctx, t0 = ctx.currentTime;
     for (let i = 0; i < 5; i++) {
@@ -1093,10 +1154,9 @@ export class AudioEngine {
       o.frequency.setValueAtTime(base, t);
       o.frequency.exponentialRampToValueAtTime(base * 0.72, t + 0.11);
       const g = ctx.createGain(); g.gain.value = 0;
-      const p = ctx.createStereoPanner(); p.pan.value = pan;
       const bp = ctx.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = 900; bp.Q.value = 1.2;
-      o.connect(bp).connect(g).connect(p).connect(this.master);
-      const s = ctx.createGain(); s.gain.value = 0.85; p.connect(s).connect(this.reverb);
+      const spatial = this._spatial(pan, rel, 0.85);
+      o.connect(bp).connect(g).connect(spatial.panner);
       g.gain.setValueAtTime(0.0001, t);
       g.gain.exponentialRampToValueAtTime(0.035, t + 0.012);
       g.gain.exponentialRampToValueAtTime(0.0001, t + 0.13);
@@ -1105,7 +1165,7 @@ export class AudioEngine {
   }
 
   // A dead radio finding a station for half a second.
-  playStaticBurst(pan = 0) {
+  playStaticBurst(pan = 0, rel = null) {
     if (!this.started) return;
     const ctx = this.ctx, t = ctx.currentTime;
     const src = ctx.createBufferSource(); src.buffer = this._longNoise; src.loop = true;
@@ -1114,9 +1174,8 @@ export class AudioEngine {
     bp.frequency.setValueAtTime(1500, t);
     bp.frequency.linearRampToValueAtTime(2600, t + 0.9);
     const g = ctx.createGain(); g.gain.value = 0;
-    const p = ctx.createStereoPanner(); p.pan.value = pan;
-    src.connect(bp).connect(g).connect(p).connect(this.master);
-    const s = ctx.createGain(); s.gain.value = 0.5; p.connect(s).connect(this.reverb);
+    const spatial = this._spatial(pan, rel, 0.5);
+    src.connect(bp).connect(g).connect(spatial.panner);
     g.gain.setValueAtTime(0.0001, t);
     // Stuttering carrier — it keeps almost tuning in.
     for (let i = 0; i < 7; i++) {

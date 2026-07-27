@@ -20,12 +20,17 @@
 import {
   HORROR, LIGHT, FOG, GUN, CREATURE, HUNTER, ANOMALIES, RENDER, JUMPSCARE, NOISE,
   STUTTER, LANDMARK_EVENTS, PIT, KEEP_AWAY, GRACE, DOOR, OUTSIDE, PLAYER, AUDIO,
+  WORLD, RITUAL_GUIDE, LANDMARK_VOICE, WITNESS,
 } from './config.js';
 import { wrapAngle, clamp, lerp } from './mathutils.js';
 import { GUN_ANCHOR } from './world.js';
 import { buildCreature, buildHunter, buildCrowdFigure } from './creature.js';
 
 const ANOMALY_KEYS = Object.keys(ANOMALIES);
+
+export function hunterStepReverb(rel, distance, closing) {
+  return distance <= 3 && Math.cos(rel) < 0 && closing ? 0 : 0.75;
+}
 
 // Flow field: distance-to-player over the open cells within this many cells.
 // 18 covers everything that can plausibly be chasing you; past that, whatever
@@ -58,6 +63,7 @@ export class Director {
     this.gunSite = null;       // { x, y, yaw, seed, pickedUp }
     this.nextGunTryAt = GUN.appearAfter;
     this.gunPlacements = 0;    // how many sites it has been through unfound
+    this.gunRevealPending = false;
     this.hasGun = false;
 
     // The exit stutter: three to five hard cuts to black with uneven lit gaps,
@@ -70,6 +76,22 @@ export class Director {
     this.pendingRitual = null;
     this.landmarksUsed = new Set();
     this.nextLandmarkAt = 18;
+
+    // Which rooms you have been in, and which you have been in twice. This is
+    // the only memory in the game that is about YOU rather than about the
+    // building, and it is what the recognition lines are made of. See
+    // _updateLandmarkPresence and LANDMARK_VOICE.
+    this.landmarkBlock = null;      // block key you are standing in, or null
+    this.landmarkBlocksSeen = new Set();
+    this.landmarkTypeCount = {};    // name -> distinct blocks of it entered
+    this.landmarkTold = new Set();  // ...and which kinds have said their line
+    this.hush = null;               // { t, dur } — the room noticing you
+    this.pendingLines = [];         // [{ text, at, tell? }] — see the delivery
+                                    // in _updateLandmarkPresence for why it is
+                                    // a queue and not one slot
+    this.nextRitualGuideAt = this._rand(
+      RITUAL_GUIDE.firstAfter[0], RITUAL_GUIDE.firstAfter[1]
+    );
     this.nextDraftAt = 8;      // the sound coming up out of a hole in the floor
     this.onGunPickup = null;
     this.onAmmoChange = null;
@@ -117,6 +139,21 @@ export class Director {
     this.onOutside = null;     // ...and you are through it
     this.onFinale = null;      // ...and the sky has started to go
 
+    // ...and how any of that is ever communicated. The rule is "stop, and let
+    // it finish", and until this existed the rule was invisible: no meter, no
+    // sound on the award, and a tenth of the fog thinning over four minutes.
+    // See config.js WITNESS. `holdActive` is set by whichever thing is worth
+    // standing still for this frame — a ritual or a held stare — and the fog
+    // opens for as long as it stays set.
+    this.holdActive = false;
+    this.holdT = 0;            // seconds of the current hold
+    this.holdName = null;      // the landmark whose note this hold would play
+    this.holdNoted = false;    // ...and whether it has played it yet
+    this.witnessOpen = 0;      // 0..1, how far the air has given
+    this.witnessBanked = 0;    // rituals actually stood through
+    this.witnessTold = new Set();
+    this.nextAirAt = Infinity; // the door's cue, before there is a door
+
     // --- gun state ---------------------------------------------------------
     this.ammo = GUN.magazine;
     this.nextShotAt = 0;
@@ -140,6 +177,55 @@ export class Director {
   }
 
   _rand(a, b) { return a + this.rng() * (b - a); }
+
+  // Keep the signed relative bearing all the way to the audio graph. Passing
+  // only sin(rel) is enough for left/right and destroys front/back: both zero
+  // and PI become a centred StereoPanner value.
+  _spatialAt(x, y) {
+    const p = this.player;
+    const rel = wrapAngle(Math.atan2(y - p.y, x - p.x) - p.angle);
+    return { rel, pan: clamp(Math.sin(rel), -1, 1) };
+  }
+
+  // Nearest walkable anchor in a landmark block. `nearestAnchor` cannot skip a
+  // used block: once its nearest result has been burned it masks every room
+  // behind it. Search blocks directly so swarm/guidance can ask for the nearest
+  // UNUSED room while the congregation is free to reuse one.
+  _nearestLandmarkTarget(radius, unusedOnly = true) {
+    const p = this.player;
+    const size = WORLD.artery;
+    const bx0 = Math.floor(p.x / size), by0 = Math.floor(p.y / size);
+    const blocks = Math.ceil(radius / size) + 1;
+    const radius2 = radius * radius;
+    let best = null, bestD2 = Infinity;
+
+    for (let by = by0 - blocks; by <= by0 + blocks; by++) {
+      for (let bx = bx0 - blocks; bx <= bx0 + blocks; bx++) {
+        const centerX = (bx + 0.5) * size;
+        const centerY = (by + 0.5) * size;
+        const landmark = this.world.landmarkAt(Math.floor(centerX), Math.floor(centerY));
+        if (!landmark) continue;
+        const key = `${Math.floor(centerX)},${Math.floor(centerY)}`;
+        if (unusedOnly && this.landmarksUsed.has(key)) continue;
+
+        const x0 = bx * size, y0 = by * size;
+        for (let cy = y0; cy < y0 + size; cy++) {
+          for (let cx = x0; cx < x0 + size; cx++) {
+            if (!this.world.isGunAnchor(cx, cy)) continue;
+            const x = cx + 0.5, y = cy + 0.5;
+            const d2 = (x - p.x) ** 2 + (y - p.y) ** 2;
+            if (d2 > radius2 || d2 >= bestD2) continue;
+            bestD2 = d2;
+            best = {
+              x, y, cx, cy, key, landmark, kind: 'ritual',
+              distance: Math.sqrt(d2),
+            };
+          }
+        }
+      }
+    }
+    return best;
+  }
 
   _anomalyStrength(type) {
     const a = this.anomaly;
@@ -178,6 +264,12 @@ export class Director {
   _addGrace(n) {
     if (this.graceLost || this.grace >= 1) return;
     this.grace = Math.min(1, this.grace + n);
+    // Before full, and only once: the air starts moving somewhere. It is the
+    // door's own cue with nothing at the end of it — see WITNESS.airAt for why
+    // a sound you cannot locate is better guidance than one you can.
+    if (this.grace >= WITNESS.airAt && this.nextAirAt === Infinity) {
+      this.nextAirAt = this.elapsed + this._rand(3.0, 7.0);
+    }
     // At full, the building starts looking for somewhere to put the door. It
     // does not announce this. The first you know is a draught.
     if (this.grace >= 1 && !this.doorSite && this.nextDoorTryAt === Infinity) {
@@ -191,9 +283,17 @@ export class Director {
   // the thing that makes NOT firing a decision rather than an omission.
   _loseGrace() {
     if (this.graceLost) return;
+    // Before the flag goes up, because after it the line cannot tell whether
+    // there was anything to lose. Only said if there was: a player who fires on
+    // the first minute has not closed a door, they have declined to open one,
+    // and being told about it would be describing a mechanic rather than
+    // reporting an event.
+    if (this.grace > 0 || this.doorSite) this._witnessLine('spent');
     this.graceLost = true;
     this.grace = 0;
     this.stareT = 0;
+    this.witnessOpen = 0;
+    this.nextAirAt = Infinity;
     this.nextDoorTryAt = Infinity;
     if (this.doorSite) {
       // It does not slam and it does not fade. The torch fails, the way every
@@ -446,6 +546,8 @@ export class Director {
       refusal: 0,
       scare: 0,
       stress: 0,
+      threatRel: null,
+      threatNear: 0,
       darkFlash: 0,
       whiteFlash: 0,
       outside: false,
@@ -531,16 +633,24 @@ export class Director {
     }
 
     // --- advance active events ---------------------------------------------
+    // Cleared here and set by whatever is worth standing still for; read by
+    // _updateHold at the bottom of the list.
+    this.holdActive = false;
+    this.holdName = null;
     this._updateFlicker(dt, fx);
     this._updatePhantom(dt, time);
     this._updateRedEyes(dt, fx);
     this._updateCreature(dt, fx);
     this._updateHunter(dt, fx);
+    this._updateThreatCues(fx);
     this._updateLightFail(dt, fx);
     this._updateAnomaly(dt, fx);
+    this._updateLandmarkPresence(dt, fx);
     this._updateLandmarkWatch(dt, fx);
     this._updateRitual(dt, fx);
+    this._updateHold(dt, fx);
     this._updateGun(fx, time, dt);
+    this._updateRitualGuide(time);
     this._updateDoor(fx, dt);
     this._updateDraft(dt);
     this._updateShake(dt, fx);
@@ -562,6 +672,21 @@ export class Director {
     }
     this.audio.update(this.dread, dt);
     return fx;
+  }
+
+  // The visual cues use one honest bearing: whichever active pursuer is nearest.
+  // Audio retains each source independently; the frame can only lean one way.
+  _updateThreatCues(fx) {
+    const p = this.player;
+    let threat = null, dist = Infinity;
+    for (const candidate of [this.creature, this.hunter]) {
+      if (!candidate || candidate.leaving || candidate.mode === 'flee') continue;
+      const d = Math.hypot(candidate.x - p.x, candidate.y - p.y);
+      if (d < dist) { threat = candidate; dist = d; }
+    }
+    if (!threat || dist >= 10) return;
+    fx.threatRel = this._spatialAt(threat.x, threat.y).rel;
+    fx.threatNear = clamp(1 - dist / 10, 0, 1);
   }
 
   _updateShake(dt, fx) {
@@ -594,9 +719,10 @@ export class Director {
       }
     }
     if (!best) return;
-    const rel = wrapAngle(Math.atan2(best.cy + 0.5 - p.y, best.cx + 0.5 - p.x) - p.angle);
-    this.audio.playPitDraft(clamp(Math.sin(rel), -1, 1),
-                            0.26 / (1 + Math.sqrt(bestD) * 0.35));
+    const { pan, rel } = this._spatialAt(best.cx + 0.5, best.cy + 0.5);
+    this.audio.playPitDraft(
+      pan, 0.26 / (1 + Math.sqrt(bestD) * 0.35), rel
+    );
   }
 
   // ==========================================================================
@@ -612,9 +738,9 @@ export class Director {
   // black again — and by the time the light is properly back you are not sure
   // which of those frames was the real one.
   //
-  // onHide fires at the point in the sequence where the thing goes.
+  // onHide fires during a black frame at the point where the thing goes.
 
-  _startStutter(onHide) {
+  _startStutter(onHide, hideAfter = STUTTER.hideAfter) {
     const lo = STUTTER.counts[0], hi = STUTTER.counts[1];
     const n = lo + ((this.rng() * (hi - lo + 1)) | 0);
     // Gamma-shaped rather than uniform: most segments land near the short end
@@ -631,21 +757,36 @@ export class Director {
       });
       if (!last) seq.push({ dark: false, dur: seg(STUTTER.litFor) });
     }
-    // Fire the old sequence's callback rather than stranding it, in the rare
-    // case two things leave on top of each other.
-    if (this.stutter && !this.stutter.hidden && this.stutter.onHide) this.stutter.onHide();
+    // If two things leave together, carry the first callback into the new
+    // sequence. Calling it here used to remove the first thing in a lit frame.
+    const callbacks = [];
+    if (this.stutter && !this.stutter.hidden && this.stutter.onHide) {
+      callbacks.push(this.stutter.onHide);
+    }
+    if (onHide) callbacks.push(onHide);
+    const combinedHide = callbacks.length
+      ? () => { for (const hide of callbacks) hide(); }
+      : null;
+
+    // Pick a DARK segment at or after the requested point. Merely comparing the
+    // segment index used to land on a lit gap about half the time.
+    const target = Math.max(1, Math.round(seq.length * hideAfter));
+    let hideAt = target;
+    while (hideAt < seq.length && !seq[hideAt].dark) hideAt++;
+    if (hideAt >= seq.length) hideAt = seq.length - 1;
+
     this.stutter = {
-      seq, i: 0, t: 0, hidden: false, onHide,
-      hideAt: Math.max(1, Math.round(seq.length * STUTTER.hideAfter)),
+      seq, i: 0, t: 0, hidden: false, onHide: combinedHide, hideAt,
     };
     this.audio.playLightFail(0.85);
   }
 
   _stutterHide() {
     const s = this.stutter;
-    if (!s || s.hidden) return;
+    if (!s || s.hidden) return false;
     s.hidden = true;
     if (s.onHide) s.onHide();
+    return true;
   }
 
   _updateStutter(dt, fx) {
@@ -655,23 +796,33 @@ export class Director {
     while (s.i < s.seq.length && s.t >= s.seq[s.i].dur) {
       s.t -= s.seq[s.i].dur;
       s.i++;
-      if (s.i >= s.hideAt) this._stutterHide();
       if (s.i < s.seq.length && s.seq[s.i].dark) {
         this.audio.playLightFail(0.4 + this.rng() * 0.35);
       }
     }
     if (s.i >= s.seq.length) {
-      this._stutterHide();
+      // A very short segment can be crossed between rendered frames. If that
+      // ever skips the intended hide point, insert one unquestionably black
+      // cover frame before letting the sequence finish.
+      if (this._stutterHide()) {
+        fx.darkFlash = 1;
+        fx.beamIntensity = 0;
+        return;
+      }
       this.stutter = null;
       this.audio.flickerWhine(0.45);
       return;
     }
     const seg = s.seq[s.i];
     if (!seg.dark) return;
+    // Remove it only now, while this exact rendered frame is black. Doing this
+    // in the transition loop could cross a short dark segment and finish on a
+    // lit one without ever showing the player the cover frame.
+    const hiddenNow = s.i >= s.hideAt && this._stutterHide();
     // Instant in, a hair softer out, so the last one bleeds back rather than
     // snapping — anything faster than about 50 ms reads as a dropped frame.
     const out = clamp((seg.dur - s.t) / 0.09, 0, 1);
-    fx.darkFlash = Math.max(fx.darkFlash, 0.06 + out * 0.94);
+    fx.darkFlash = Math.max(fx.darkFlash, hiddenNow ? 1 : 0.06 + out * 0.94);
     fx.beamIntensity = 0;
   }
 
@@ -687,8 +838,186 @@ export class Director {
   // atrium core, something looking up at you out of the shaft, the lattice of
   // the combs filling in, one pair on the chapel plinth.
 
+  // Crossing into one of them. This is separate from the ritual watch above and
+  // deliberately so: the ritual is what the room DOES to you, on a cooldown, at
+  // most once per block ever. This is only the room registering that you walked
+  // in, it has no cooldown and it never runs out, because being told you have
+  // been somewhere before has to work the tenth time as well as the second.
+  _updateLandmarkPresence(dt, fx) {
+    const p = this.player;
+    const name = this.world.landmarkAt(Math.floor(p.x), Math.floor(p.y));
+    let key = null;
+    if (name) {
+      const c = this.world.blockCenter(Math.floor(p.x), Math.floor(p.y));
+      key = Math.floor(c.x) + ',' + Math.floor(c.y);
+    }
+    if (key !== this.landmarkBlock) {
+      this.landmarkBlock = key;
+      if (key && !this.landmarkBlocksSeen.has(key)) {
+        this.landmarkBlocksSeen.add(key);
+        this._enterLandmark(name);
+      }
+    }
+
+    // The hush. The mix is ducked by the audio graph on its own schedule; this
+    // is the picture half — the fog opens a little, so for a second and a bit
+    // you can see further into the room than you could walking up to it.
+    if (this.hush) {
+      this.hush.t += dt;
+      if (this.hush.t >= this.hush.dur) this.hush = null;
+      else fx.fogDensity *= 1 - LANDMARK_VOICE.hushFog *
+        Math.sin((this.hush.t / this.hush.dur) * Math.PI);
+    }
+
+    // A line that was queued on the way in. Not while something is in the room
+    // with you: "the same six doors" over the top of a hunter is a joke, and the
+    // subtitle slot is the building answering the gun, which matters more.
+    //
+    // A QUEUE AND NOT A SLOT. This was one pending line, and the second one to
+    // be queued inside two seconds silently replaced the first — which was
+    // survivable while the only speaker was a landmark you had walked into
+    // twice, and stopped being survivable the moment the witness lines started
+    // sharing the slot: banking a ritual could overwrite the line that had just
+    // explained what banking a ritual was.
+    const pl = this.pendingLines[0];
+    if (pl && this.elapsed >= pl.at) {
+      this.pendingLines.shift();
+      if (this.onLine && !this.hunter && !this.creature) {
+        // Marked as said HERE and not when it was queued. A line dropped
+        // because something was in the room with you has not been said, and
+        // the once-ever lines have to be able to come round again — see
+        // _witnessLine.
+        if (pl.tell) this.witnessTold.add(pl.tell);
+        this.onLine(pl.text);
+      }
+      // Whatever is behind it does not arrive on the same breath.
+      if (this.pendingLines[0]) {
+        this.pendingLines[0].at = Math.max(this.pendingLines[0].at, this.elapsed + 2.4);
+      }
+    }
+  }
+
+  _enterLandmark(name) {
+    const n = (this.landmarkTypeCount[name] = (this.landmarkTypeCount[name] || 0) + 1);
+
+    // Every time, wordlessly: the building stops for a beat.
+    this.hush = { t: 0, dur: LANDMARK_VOICE.hushFor };
+    this.audio.quietBeat({
+      target: LANDMARK_VOICE.duckTo,
+      attack: 0.10,
+      hold: LANDMARK_VOICE.duckHold,
+      release: 0.8,
+    });
+    this._playLandmarkNote(name, LANDMARK_VOICE.noteVolume);
+
+    // The second one of its kind, once, ever. See LANDMARK_VOICE for why this is
+    // the second and not the first, and why it is not a count.
+    const text = LANDMARK_VOICE.lines[name];
+    if (n >= 2 && text && !this.landmarkTold.has(name)) {
+      this.landmarkTold.add(name);
+      this.pendingLines.push({
+        text,
+        at: this.elapsed + this._rand(LANDMARK_VOICE.lineAfter[0], LANDMARK_VOICE.lineAfter[1]),
+      });
+    }
+  }
+
+  // THE AIR GIVING. The entire teaching mechanism for the sixth ending, and it
+  // is one number moving one way and then the other.
+  //
+  // Stand still while the building is showing you something and the fog opens,
+  // slowly, over a couple of seconds. Move and it closes in half of one. There
+  // is nothing else — no meter, no prompt, no sound the first time. What makes
+  // it legible is that the player has already been taught this exact sentence
+  // twice before they ever hold one: the fog opens when you cross into a
+  // landmark, and it is permanently a shade thinner the more grace you have.
+  // This is the third use of the same word, under the one behaviour that
+  // actually earns the way out, and it is the only one you can turn on and off
+  // yourself. That is what makes it a rule rather than an effect.
+  //
+  // It deliberately does NOT distinguish between a ritual and a held stare. The
+  // player is not being taught "rituals reward stillness", they are being
+  // taught that this building gives when you stop, which is true of both and is
+  // the whole thesis of the ending.
+  _updateHold(dt, fx) {
+    const open = this.holdActive && !this.graceLost;
+    if (open) {
+      this.holdT += dt;
+      this.witnessOpen = Math.min(1, this.witnessOpen + dt / WITNESS.openIn);
+    } else {
+      this.holdT = 0;
+      this.witnessOpen = Math.max(0, this.witnessOpen - dt / WITNESS.closeIn);
+      // Only once it has fully shut, so a single flinch does not buy the note
+      // below a second time.
+      if (this.witnessOpen <= 0) this.holdNoted = false;
+    }
+    if (this.witnessOpen > 0) fx.fogDensity *= 1 - WITNESS.fog * this.witnessOpen;
+
+    // A breath under it, at the point the standing still has clearly become
+    // deliberate rather than incidental. The room's own note, very quietly —
+    // the same one it played when you walked in, so what it says is "this room
+    // knows", not "well done".
+    if (open && this.holdName && !this.holdNoted && this.holdT >= WITNESS.noteAfter) {
+      this.holdNoted = true;
+      this._playLandmarkNote(this.holdName, WITNESS.noteVolume);
+    }
+  }
+
+  // One of the three lines that exist to make the way out deducible. Once each,
+  // ever, and never an instruction — see WITNESS.lines.
+  //
+  // `witnessTold` is checked here and SET at delivery, not here. A line that is
+  // swallowed because a hunter walked in has not been said, and these three are
+  // the only explanation the mechanic ever gets — losing one to bad timing
+  // would put the player back where they started.
+  _witnessLine(which) {
+    const text = WITNESS.lines[which];
+    if (!text || this.witnessTold.has(which)) return;
+    if (this.pendingLines.some((l) => l.tell === which)) return;
+    this.pendingLines.push({
+      text,
+      tell: which,
+      at: this.elapsed + this._rand(WITNESS.lineAfter[0], WITNESS.lineAfter[1]),
+    });
+  }
+
+  // The room's own note, at a fraction of the volume its ritual uses it at.
+  // Same instrument on purpose: the sound you hear walking in is the sound you
+  // hear when the room does something, so the first teaches you the second
+  // without a word of explanation.
+  _playLandmarkNote(name, vol) {
+    switch (name) {
+      case 'ward':   this.audio.playDistantCall(vol * 0.9, 0); break;
+      case 'atrium': this.audio.playDrone({ freq: 37, dur: 2.4, volume: vol * 0.8 }); break;
+      case 'shaft':  this.audio.playPitDraft(0, vol * 1.2); break;
+      case 'combs':  this.audio.playWhisper({ pan: -0.6, volume: vol * 0.55 });
+                     this.audio.playWhisper({ pan: 0.6, volume: vol * 0.55 }); break;
+      case 'chapel': this.audio.playDistantCall(vol * 1.1, 0); break;
+    }
+  }
+
   _updateLandmarkWatch(dt, fx) {
     const p = this.player;
+    // ONE ARMING, NOT ONE PER FRAME. This ran every frame you were standing in
+    // a landmark and overwrote `pendingRitual` with a fresh `elapsed + 1.2..2.6`
+    // each time, so the moment it was waiting for receded at exactly the speed
+    // time was passing and it could never arrive. What actually happened was
+    // that the ritual fired on the first frame you STOPPED being in the room —
+    // out in the corridor, with its eyes placed around wherever you had got to
+    // — which is why the ranks never appeared down the ward and why standing
+    // still in a landmark did nothing at all.
+    //
+    // The other half of that: an armed room owns its event until you leave it.
+    // Walk out and it un-arms, silently, and the room keeps the event for the
+    // next time. That is what stops the ward's files from being placed out in
+    // the artery around a player who has already gone.
+    if (this.pendingRitual) {
+      const q = this.pendingRitual;
+      if (Math.hypot(p.x - q.cx, p.y - q.cy) > LANDMARK_EVENTS.holdWithin) {
+        this.pendingRitual = null;
+      }
+      return;
+    }
     const name = this.world.landmarkAt(Math.floor(p.x), Math.floor(p.y));
     if (!name || this.ritual || this.creature || this.hunter) return;
     if (this.elapsed < this.nextLandmarkAt) return;
@@ -699,29 +1028,57 @@ export class Director {
 
     const cfg = LANDMARK_EVENTS[name];
     if (!cfg) return;
+    const at = this.elapsed + this._rand(cfg.delay[0], cfg.delay[1]);
     this.pendingRitual = {
       name, cfg, key, cx: c.x, cy: c.y,
-      at: this.elapsed + this._rand(cfg.delay[0], cfg.delay[1]),
+      at,
+      deadline: at + LANDMARK_EVENTS.patience,
     };
   }
 
-  _fireRitual(pending) {
-    const { name, cfg, cx, cy } = pending;
+  // How many pairs of a formation you could actually see from where you are
+  // standing right now. Placement is authored to the room; whether the room has
+  // LANDED is measured, and measured here only.
+  _eyesInView(eyes) {
+    let n = 0;
+    for (const e of eyes) if (this._isFacingPoint(e.x, e.y)) n++;
+    return n;
+  }
+
+  // One candidate orientation of a room's formation. `variant` means something
+  // different to each kind — which way the files run, which way round the ring
+  // starts, which side of the plinth — but in every case variant 0 is the one
+  // the room would choose if you were standing where it expects you.
+  _buildRitual(pending, variant) {
+    const { cfg, cx, cy } = pending;
     const p = this.player;
     const eyes = [];
 
+    // ONLY THE WALL TEST. This used to demand line of sight as well, which
+    // deleted precisely the eyes a formation exists to put behind you: the far
+    // half of the atrium ring is on the other side of the core it is drawn
+    // around, and was thrown away every single time, so a ten-pair ring arrived
+    // as four stragglers and the fallback scatter below took over. What you can
+    // see is the renderer's business — it depth-tests billboards against the
+    // walls like everything else — and the director's only at aiming time.
     const add = (x, y, z, scale, delay) => {
       if (this.world.isWall(Math.floor(x), Math.floor(y))) return;
-      if (!this._hasLineOfSight(x, y)) return;
       eyes.push({ x, y, z, scale, delay });
     };
 
     switch (cfg.kind) {
       case 'ranks': {
-        // Two files, down whichever axis of the corridor you are actually
-        // looking along, staggered so the far ones resolve last.
-        const along = Math.abs(Math.cos(p.angle)) > Math.abs(Math.sin(p.angle))
-          ? [Math.sign(Math.cos(p.angle)), 0] : [0, Math.sign(Math.sin(p.angle))];
+        // Two files down the ward corridor, staggered so the far ones resolve
+        // last. The ward is a cross of two two-wide corridors, so there are four
+        // ways to run them; variant 0 is the one you are already facing and the
+        // rest are what the aimer falls through when that one is pointing into
+        // the paired rooms.
+        const dirs = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+        const facing = Math.abs(Math.cos(p.angle)) > Math.abs(Math.sin(p.angle))
+          ? (Math.cos(p.angle) > 0 ? 0 : 1)
+          : (Math.sin(p.angle) > 0 ? 2 : 3);
+        const order = [facing, ...[0, 1, 2, 3].filter((i) => i !== facing)];
+        const along = dirs[order[variant % 4]];
         const perp = [-along[1], along[0]];
         for (let i = 0; i < cfg.eyes; i++) {
           const d = 4.0 + i * 2.1;
@@ -734,60 +1091,195 @@ export class Director {
         break;
       }
       case 'circle': {
-        // A ring around the solid core, so they are behind you as well.
-        for (let i = 0; i < cfg.eyes * 2; i++) {
-          const a = (i / (cfg.eyes * 2)) * Math.PI * 2;
-          add(cx + Math.cos(a) * 5.4, cy + Math.sin(a) * 5.4, 0.58, 0.24, i * 0.11);
+        // A ring around the solid core, so they are behind you as well. Rotating
+        // a ring does not change what the ring is, but it does change whether
+        // one of them is dead ahead when it arrives — and the ones that arrive
+        // first are the ones nearest your bearing, so it fills in from where you
+        // are looking and closes behind you.
+        const n = cfg.eyes * 2;
+        const step = (Math.PI * 2) / n;
+        const phase = (variant / 4) * step;
+        const toward = Math.atan2(p.y - cy, p.x - cx);
+        for (let i = 0; i < n; i++) {
+          const a = phase + i * step;
+          const near = Math.abs(wrapAngle(a - toward)) / Math.PI;   // 0 ahead, 1 behind
+          add(cx + Math.cos(a) * 5.4, cy + Math.sin(a) * 5.4, 0.58, 0.24, near * 1.15);
         }
         break;
       }
       case 'below': {
         // Down in the hole, looking up. Nothing else in the game is under you.
+        // Variant 0 will only take holes in front of you; the later ones widen
+        // out until it will take any hole in the room.
+        const cone = [HORROR.seenAngle, 1.1, 1.9, Math.PI][variant % 4];
+        const cands = [];
         for (let dy = -6; dy <= 6; dy++) {
           for (let dx = -6; dx <= 6; dx++) {
-            if (eyes.length >= cfg.eyes) break;
             const gx = Math.floor(p.x) + dx, gy = Math.floor(p.y) + dy;
             if (!this.world.isPit(gx, gy)) continue;
-            if (this.rng() > 0.34) continue;
-            add(gx + 0.5, gy + 0.5, -PIT.eyesAt, 0.30, this.rng() * 1.4);
+            const x = gx + 0.5, y = gy + 0.5;
+            if (Math.abs(wrapAngle(Math.atan2(y - p.y, x - p.x) - p.angle)) > cone) continue;
+            cands.push({ x, y, d: Math.hypot(x - p.x, y - p.y) });
           }
+        }
+        cands.sort((a, b) => a.d - b.d);
+        // Stride rather than take the nearest N, or all three end up in the
+        // same square metre of rim right under your feet.
+        const stride = Math.max(1, Math.floor(cands.length / cfg.eyes));
+        for (let i = 0; i < cands.length && eyes.length < cfg.eyes; i += stride) {
+          add(cands[i].x, cands[i].y, -PIT.eyesAt, 0.30, this.rng() * 1.4);
         }
         break;
       }
       case 'lattice': {
-        // On the lattice itself, one per gap, so the regularity of the room
-        // becomes the regularity of them.
-        for (let i = 0; i < cfg.eyes; i++) {
-          const gx = cx + ((i % 3) - 1) * 4;
-          const gy = cy + (((i / 3) | 0) - 1) * 4;
-          add(gx, gy, 0.60, 0.22, i * 0.17);
+        // On the lattice itself, so the regularity of the room becomes the
+        // regularity of them.
+        //
+        // THE STEP HAS TO MATCH THE TEMPLATE. At the 4 cells this used to use,
+        // every one of the eight grid points landed on a pillar — the combs' 3x3
+        // pillar array sits on exactly that pitch — so the whole formation was
+        // rejected by the wall test and only the cells an artery happened to
+        // have carved through ever survived. Six puts them in the lanes at the
+        // block's rim, which is where you can be standing to see down one. The
+        // other steps are there for the aimer to fall through when a walkway has
+        // been cut through the block and moved the lanes.
+        const step = [6, 5, 4, 3][variant % 4];
+        const spots = [];
+        for (let gy = -1; gy <= 1; gy++) {
+          for (let gx = -1; gx <= 1; gx++) {
+            if (!gx && !gy) continue;      // the middle of a combs block is a pillar
+            spots.push([cx + gx * step, cy + gy * step]);
+          }
+        }
+        // They fill in from the one nearest whatever you are looking down, which
+        // is what makes the row in front of you the row that lights up first.
+        const ax = p.x + Math.cos(p.angle) * 6, ay = p.y + Math.sin(p.angle) * 6;
+        spots.sort((a, b) => Math.hypot(a[0] - ax, a[1] - ay) - Math.hypot(b[0] - ax, b[1] - ay));
+        for (let i = 0; i < cfg.eyes && i < spots.length; i++) {
+          add(spots[i][0], spots[i][1], 0.60, 0.22, i * 0.17);
         }
         break;
       }
       case 'altar': {
         // One pair, on the plinth, much bigger than the rest and at the height
         // of something that is standing on it.
-        add(cx, cy, 0.86, 0.62, 0);
+        //
+        // The plinth is SOLID — it is the `##` at the crossing of the chapel
+        // template — so asking for the block centre itself was always rejected
+        // by the wall test and the chapel silently fell through to the scatter
+        // below every single time. It goes at the foot of the plinth instead.
+        //
+        // WHICH foot matters more than it looks. Placing it on the side you are
+        // STANDING on put it behind you as often as not, and the altar is a
+        // single pair — one pair out of your cone is a ritual that did not
+        // happen. It sweeps every foot of the plinth and takes the one nearest
+        // to where you are already looking; the variants are the next four.
+        const cands = [];
+        for (const r of [1.9, 2.6, 1.4, 3.2]) {
+          for (let i = 0; i < 8; i++) {
+            const a = (i / 8) * Math.PI * 2;
+            const x = cx + Math.cos(a) * r, y = cy + Math.sin(a) * r;
+            const gx = Math.floor(x), gy = Math.floor(y);
+            // Not over one of the chapel's two holes: a pair hanging in mid-air
+            // over the drop is a bug, not an altar.
+            if (this.world.isWall(gx, gy) || this.world.isPit(gx, gy)) continue;
+            cands.push({ x, y, rel: Math.abs(wrapAngle(Math.atan2(y - p.y, x - p.x) - p.angle)) });
+          }
+        }
+        cands.sort((a, b) => a.rel - b.rel);
+        const c = cands[Math.min(variant, cands.length - 1)];
+        if (c) add(c.x, c.y, 0.86, 0.62, 0);
         break;
       }
     }
+    return eyes;
+  }
 
-    // The shape of the room is what each of these is built around, and by the
-    // time it fires you have walked a few metres further into it — so most of
-    // the intended positions can be inside a wall. Rather than have the event
-    // silently not happen, fall back to scattering the same number of them
-    // wherever they can actually be seen from where you are now.
-    if (eyes.length < 2) {
-      for (let i = 0; i < cfg.eyes * 3 && eyes.length < cfg.eyes; i++) {
-        const a = p.angle + this._rand(-1.5, 1.5);
-        const dd = this._rand(3.5, 11);
-        add(p.x + Math.cos(a) * dd, p.y + Math.sin(a) * dd,
-            cfg.kind === 'below' ? -PIT.eyesAt : this._rand(0.34, 0.64),
-            this._rand(0.18, 0.28), this.rng() * 1.5);
-      }
+  // Try to land the room's event. Returns true if it fired.
+  //
+  // AIM, DO NOT SCATTER. The old version built one formation, deleted every pair
+  // it could not see, and if fewer than two survived it threw the room's shape
+  // away entirely and sprinkled the same number of pairs at random bearings in
+  // front of you — so the two events most worth building, the ward's files and
+  // the atrium's ring, were the two most likely to come out as confetti. It now
+  // builds each candidate orientation, counts how many pairs would actually be
+  // in your view cone, and either fires the best one or WAITS. The room has
+  // `patience` seconds to catch you looking the right way, and it does not spend
+  // itself until it has.
+  _fireRitual(pending, forced) {
+    const { cfg } = pending;
+    // How much of it has to be in front of you before the room is worth
+    // spending. A quarter, capped at three: two pairs of red points arriving
+    // down a corridor is the event registering, and the rest resolve as you
+    // look. At a third of the count the combs — eight pairs in a pillar forest
+    // that occludes most of itself from anywhere you can stand — waited out its
+    // whole patience three times in five and fired blind anyway.
+    const want = clamp(Math.ceil(cfg.eyes * 0.25), 1, 3);
+    let best = null, bestScore = -1, bestRank = -1;
+    for (let v = 0; v < 4; v++) {
+      const eyes = this._buildRitual(pending, v);
+      if (!eyes.length) continue;
+      const score = this._eyesInView(eyes);
+      // TIES GO TO THE BIGGER FORMATION. On a plain `score > bestScore` the
+      // shaft's narrowest variant — one pair in the nearest hole, trivially
+      // all-visible, score 1 — beat the wide one that found six, because six
+      // pairs spread round the rim also had only one in the cone and 1 > 1 is
+      // false. Which is how "something is looking up at you out of the shaft"
+      // came out as a single dot.
+      const rank = score * 1000 + eyes.length;
+      if (rank > bestRank) { bestRank = rank; bestScore = score; best = eyes; }
+      // Stop only on a formation that is BOTH complete and entirely in front of
+      // you. Breaking on `score >= eyes.length` alone let that same one-pair
+      // variant short-circuit the search before the wide ones were even built.
+      if (score >= eyes.length && score >= want) break;
     }
-    // Only burn the landmark once it has actually managed to do something.
-    if (!eyes.length) return;
+    if (!best) return forced ? this._fireScatter(pending) : false;
+
+    if (bestScore >= Math.min(want, best.length)) {
+      this._commitRitual(pending, best);
+      return true;
+    }
+    if (!forced) return false;
+    // Out of patience. The room happens anyway, in the place the room wanted it
+    // — an altar at the foot of the plinth behind you is still an altar, the
+    // cue plays, and you have the rest of its life to turn round. The scatter is
+    // strictly worse than that and is only for when the formation is EMPTY:
+    // nothing the template asked for could be placed at all.
+    this._commitRitual(pending, best);
+    return true;
+  }
+
+  // Last resort, and only ever reached once the room has run out of patience:
+  // the same number of pairs at random bearings you can definitely see. This
+  // discards the shape of the room, which is why it is last.
+  _fireScatter(pending) {
+    const { cfg } = pending;
+    const p = this.player;
+    const eyes = [];
+    for (let i = 0; i < cfg.eyes * 4 && eyes.length < cfg.eyes; i++) {
+      const a = p.angle + this._rand(-1.5, 1.5);
+      const dd = this._rand(3.5, 11);
+      const x = p.x + Math.cos(a) * dd, y = p.y + Math.sin(a) * dd;
+      if (this.world.isWall(Math.floor(x), Math.floor(y))) continue;
+      if (!this._hasLineOfSight(x, y)) continue;
+      eyes.push({
+        x, y,
+        z: cfg.kind === 'below' ? -PIT.eyesAt : this._rand(0.34, 0.64),
+        scale: this._rand(0.18, 0.28),
+        delay: this.rng() * 1.5,
+      });
+    }
+    if (!eyes.length) return false;
+    this._commitRitual(pending, eyes);
+    return true;
+  }
+
+  _commitRitual(pending, eyes) {
+    const { name, cfg } = pending;
+    const p = this.player;
+    // How far away each of them started. The leave test measures how much you
+    // have CLOSED on them, not where they are — see _updateRitual.
+    for (const e of eyes) e.startDist = Math.hypot(e.x - p.x, e.y - p.y);
     this.landmarksUsed.add(pending.key);
     this.ritual = { name, kind: cfg.kind, t: 0, life: this._rand(4.6, 7.4), eyes, leaving: false };
     this.nextLandmarkAt = this.elapsed + LANDMARK_EVENTS.cooldown;
@@ -804,15 +1296,35 @@ export class Director {
   }
 
   _updateRitual(dt, fx) {
-    if (this.pendingRitual && this.elapsed >= this.pendingRitual.at) {
-      const pending = this.pendingRitual;
-      this.pendingRitual = null;
-      this._fireRitual(pending);
+    // Ready is not the same as fired. Past `at` the room tries every frame to
+    // land its formation somewhere you are looking; past `deadline` it stops
+    // being fussy and takes what it can get. Either way, one attempt that gets
+    // all the way through _fireScatter and still has nothing gives the room back
+    // — unburned, uncharged, still there next time.
+    const pending = this.pendingRitual;
+    if (pending && this.elapsed >= pending.at) {
+      const forced = this.elapsed >= pending.deadline;
+      if (this._fireRitual(pending, forced) || forced) this.pendingRitual = null;
     }
 
     const r = this.ritual;
     if (!r) return;
     r.t += dt;
+    // How much of it you spent standing still. Not approaching them is not the
+    // same as watching them: a bot that wandered off in a random direction let
+    // four rituals in seven run their course and got most of the way to the
+    // door without ever deciding anything. Only this decides what it is worth —
+    // the event itself plays out identically either way, because what the room
+    // does is not conditional on you, and never has been.
+    if (!this.player.moving) r.stillT = (r.stillT || 0) + dt;
+    // ...and while it is still running, that stillness is worth showing. See
+    // _updateHold: this is the frame-by-frame half of the same decision, and it
+    // is the only reason a player can find out the rule while it still matters
+    // rather than afterwards.
+    if (!r.leaving && !this.player.moving) {
+      this.holdActive = true;
+      this.holdName = r.name;
+    }
 
     for (const e of r.eyes) {
       const t = r.t - e.delay;
@@ -831,23 +1343,55 @@ export class Director {
     // to, and the ranks down a ward corridor were the worst offender — twelve
     // pairs of eyes are terrifying at the far end and a line of floating dots
     // when you are standing among them.
+    //
+    // MEASURE THE APPROACH, NOT THE RANGE. This was a flat "is anything within
+    // seven metres" test, and every one of these events puts its nearest pair
+    // between two and six metres away by design — the ranks start at four. So
+    // the test was already true on the frame it fired and every ritual in the
+    // game was cut off at 0.9 s no matter what the player did. The swarm anomaly
+    // had exactly this bug and exactly this fix; the rituals never got it.
     const p = this.player;
-    let near = Infinity;
+    const approach = r.kind === 'altar' ? KEEP_AWAY.altar : KEEP_AWAY.ritual;
+    let closed = false;
     for (const e of r.eyes) {
-      const d2 = (e.x - p.x) ** 2 + (e.y - p.y) ** 2;
-      if (d2 < near) near = d2;
+      const leaveAt = Math.max(1.4, (e.startDist || Infinity) - approach);
+      if ((e.x - p.x) ** 2 + (e.y - p.y) ** 2 < leaveAt * leaveAt) { closed = true; break; }
     }
-    near = Math.sqrt(near);
-    const keep = r.kind === 'altar' ? 3.4 : KEEP_AWAY.ritual;
     const done = r.t >= r.life;
-    if (!r.leaving && (done || (r.t > 0.9 && near < keep))) {
+    if (!r.leaving && (done || (r.t > 0.9 && closed))) {
       r.leaving = true;
       this.audio.setHeartbeat(0);
-      // THE DIFFERENCE BETWEEN THE TWO WAYS THIS ENDS. One of them is the room
-      // finishing with you; the other is you walking into it and breaking it up.
-      // Only the first is worth anything, and this one line is the spine of the
-      // sixth ending — everything else about it is delivery.
-      if (done) this._addGrace(GRACE.perRitual);
+      // THE DIFFERENCE BETWEEN THE THREE WAYS THIS ENDS. You walk into it and
+      // break it up; you wander off and it finishes without you; or you stop,
+      // and stay stopped, and let it finish. Only the third is worth anything,
+      // and these two lines are the spine of the sixth ending — everything else
+      // about it is delivery.
+      const watched = (r.stillT || 0) >= Math.min(GRACE.witnessFor, r.life * 0.55);
+      if (done && watched && !this.graceLost) {
+        this._addGrace(GRACE.perRitual);
+        // THE ROOM ANSWERING. Its own note, at ritual volume this time, and the
+        // mix ducking under it — the same two things that happen when you first
+        // walk into one of these rooms, which is deliberate. The award used to
+        // be completely silent, so the single most consequential thing a player
+        // can do in this game had no output at all.
+        this._playLandmarkNote(r.name, WITNESS.bankNote);
+        this.audio.quietBeat({
+          target: WITNESS.bankDuck, attack: 0.08, hold: 0.5, release: 0.9,
+        });
+        this.witnessBanked++;
+        // Late, once, and only after it has happened twice — by which point it
+        // is a thing the player has noticed rather than a thing they are being
+        // told. Same rule as the second visit to a landmark.
+        // At LEAST two, not exactly two: if the line was swallowed by something
+        // being in the room, the next one banked offers it again.
+        if (this.witnessBanked >= 2) this._witnessLine('kept');
+      } else if (done && !this.graceLost) {
+        // ...and the diagnosis, the first time one runs out with you walking
+        // around inside it. Most players get this line before the one above,
+        // which is the right order: you find out something was on offer, and
+        // then some minutes later you find out what it wanted.
+        this._witnessLine('missed');
+      }
       this._startStutter(() => { this.ritual = null; });
     }
   }
@@ -861,8 +1405,17 @@ export class Director {
 
       case 'phantomSteps': {
         // Do not overwrite the one set of footsteps that is actually going
-        // somewhere: late gun guidance crosses the player and ends at the site.
+        // somewhere: a guide crosses the player and ends at a real destination.
         if (this.phantom && this.phantom.mode === 'gunGuide') break;
+        const guide = !this.phantom && !this.creature && !this.hunter &&
+          !this.ritual && !this.pendingRitual &&
+          (!this.gunSite || this.gunSite.pickedUp)
+          ? this._nearestLandmarkTarget(RITUAL_GUIDE.footstepRadius, true)
+          : null;
+        if (guide && this.rng() < RITUAL_GUIDE.phantomChance) {
+          this._startPhantomGuide(guide, time, 'landmark');
+          break;
+        }
         const p = this.player;
         const bearing = p.angle + Math.PI + this._rand(-0.35, 0.35);
         const dist = this.hasGun ? this._rand(2.8, 4.6) : this._rand(4, 6);
@@ -941,6 +1494,33 @@ export class Director {
 
   // --- footsteps behind you -------------------------------------------------
 
+  _startPhantomGuide(target, time, guideKind = 'gun') {
+    if (this.phantom) return false;
+    const p = this.player;
+    const dx = target.x - p.x, dy = target.y - p.y;
+    const d = Math.hypot(dx, dy);
+    if (d < 1) return false;
+    const ux = dx / d, uy = dy / d;
+    const cross = (this.rng() - 0.5) * 0.8;
+    const total = d + 2.4;
+    const step = Math.max(0.58, total / RITUAL_GUIDE.maxSteps);
+    this.phantom = {
+      // Retain the established mode name: gun guidance and ritual guidance share
+      // the same crossing path; `guideKind` only chooses the sound at its end.
+      mode: 'gunGuide',
+      guideKind,
+      landmark: target.landmark || null,
+      srcX: p.x - ux * 2.4 - uy * cross,
+      srcY: p.y - uy * 2.4 + ux * cross,
+      targetX: target.x,
+      targetY: target.y,
+      step,
+      stepsLeft: Math.ceil(total / step) + 2,
+      nextStep: time + 0.2,
+    };
+    return true;
+  }
+
   _updatePhantom(dt, time) {
     const ph = this.phantom;
     if (!ph) return;
@@ -952,7 +1532,7 @@ export class Director {
       const distFromPlayer = Math.hypot(ph.srcX - p.x, ph.srcY - p.y);
       const pan = clamp(Math.sin(rel), -1, 1);
       const vol = clamp(0.9 / (1 + distFromPlayer * 0.24), 0.16, 0.64);
-      if (!this._isSilent()) this.audio.playPhantomStep(pan, vol);
+      if (!this._isSilent()) this.audio.playPhantomStep(pan, vol, rel);
       ph.nextStep = time + this._rand(0.30, 0.43);
 
       const dx = ph.targetX - ph.srcX, dy = ph.targetY - ph.srcY;
@@ -960,7 +1540,14 @@ export class Director {
       if (remaining <= ph.step || ph.stepsLeft-- <= 1) {
         ph.srcX = ph.targetX;
         ph.srcY = ph.targetY;
-        if (!this._isSilent()) this.audio.playShellDrop(pan);
+        if (!this._isSilent()) {
+          const atTarget = this._spatialAt(ph.targetX, ph.targetY);
+          if (ph.guideKind === 'landmark' && ph.landmark) {
+            this._playGunLandmarkCue(ph, atTarget.pan, atTarget.rel);
+          } else {
+            this.audio.playShellDrop(atTarget.pan, atTarget.rel);
+          }
+        }
         this.phantom = null;
         return;
       }
@@ -982,7 +1569,7 @@ export class Director {
       const force = this.hasGun ? 1.05 : 0.5;
       const vol = clamp(force / (1 + dist * 0.32), this.hasGun ? 0.14 : 0.05, this.hasGun ? 0.78 : 0.45);
       const pan = clamp(Math.sin(rel), -1, 1);
-      if (!this._isSilent()) this.audio.playPhantomStep(pan, vol);
+      if (!this._isSilent()) this.audio.playPhantomStep(pan, vol, rel);
       ph.nextStep = time + (this.hasGun ? this._rand(0.24, 0.40) : this._rand(0.42, 0.6));
       ph.stepsLeft--;
       const toward = Math.atan2(p.y - ph.srcY, p.x - ph.srcX);
@@ -1159,7 +1746,6 @@ export class Director {
 
     let dx = p.x - c.x, dy = p.y - c.y;
     let dist = Math.hypot(dx, dy);
-    const bearing = Math.atan2(dy, dx);
     const watched = this._isFacingPoint(c.x, c.y, 0.55);
 
     // HOLDING YOUR GROUND. Watching it is already the central cost of the game:
@@ -1170,6 +1756,11 @@ export class Director {
     // nerve you hold, not a resource you farm.
     if (!c.leaving && watched && !p.moving && dist <= GRACE.stareRange &&
         !this.graceLost && this.stareEarned < GRACE.stareCap) {
+      // Same signal as standing through a ritual, on purpose — the fog opens
+      // while you hold it. Nothing here is about rituals specifically; it is
+      // about being still while the building is doing something, and a player
+      // who learns it from the creature has learnt the right thing.
+      this.holdActive = true;
       this.stareT += dt;
       if (this.stareT >= GRACE.stareFor) {
         this.stareT = 0;
@@ -1206,7 +1797,7 @@ export class Director {
           c.t >= c.nextChargeRoll && !this._fogConceals() &&
           this._hasLineOfSight(c.x, c.y)) {
         c.nextChargeRoll = c.t + CREATURE.chargeRollEvery;
-        if (this.rng() < CREATURE.chargeChance + this.dread * 0.28) this._beginCharge(c, bearing);
+        if (this.rng() < CREATURE.chargeChance + this.dread * 0.28) this._beginCharge(c);
       }
     } else if (c.mode === 'charge') {
       c.speed = CREATURE.chargeSpeed;
@@ -1262,19 +1853,20 @@ export class Director {
     c.phase += strideRate * dt;
     // A footfall at the bottom of each stride, panned to its bearing.
     const stepIndex = Math.floor(c.phase / Math.PI);
+    const spatial = this._spatialAt(c.x, c.y);
     if (stepIndex !== c.lastStepPhase) {
       c.lastStepPhase = stepIndex;
-      const rel = wrapAngle(bearing - p.angle);
       const vol = clamp(0.55 / (1 + dist * 0.30), 0.03, 0.55);
       if (dist < 15 && !this._isSilent()) {
-        this.audio.playCreatureStep(clamp(Math.sin(rel), -1, 1), vol);
+        this.audio.playCreatureStep(spatial.pan, vol, spatial.rel);
       }
     }
 
     // --- audio proximity ----------------------------------------------------
-    const rel = wrapAngle(bearing - p.angle);
     const near = clamp(1 - dist / CREATURE.breathDistance, 0, 1);
-    this.audio.setBreath(near * (c.mode === 'charge' ? 1.6 : 1), clamp(Math.sin(rel), -1, 1));
+    this.audio.setBreath(
+      near * (c.mode === 'charge' ? 1.6 : 1), spatial.pan, spatial.rel
+    );
     this.audio.setHeartbeat(clamp(near * 1.3, 0, 1));
     fx.stress = near * (c.mode === 'charge' ? 1 : 0.45);
 
@@ -1314,12 +1906,12 @@ export class Director {
     });
   }
 
-  _beginCharge(c, bearing) {
+  _beginCharge(c) {
     c.mode = 'charge';
     c.chargeStart = c.t;
     this.shake = 0.5;
-    const rel = wrapAngle(bearing - this.player.angle);
-    this.audio.playDistantCall(0.45 + this.dread * 0.25, clamp(Math.sin(rel), -1, 1));
+    const { pan, rel } = this._spatialAt(c.x, c.y);
+    this.audio.playDistantCall(0.45 + this.dread * 0.25, pan, rel);
     this.dread = Math.min(HORROR.dreadMax, this.dread + 0.05);
   }
 
@@ -1335,7 +1927,8 @@ export class Director {
     const charging = c.mode === 'charge';
     if (JUMPSCARE.enabled && charging) { this._caught(); return; }
 
-    this.audio.playVanish(charging ? 0.8 : 0.55, 0);
+    const { pan, rel } = this._spatialAt(c.x, c.y);
+    this.audio.playVanish(charging ? 0.8 : 0.55, pan, rel);
     this.shake = charging ? 0.8 : 0.4;
     this.dread = Math.max(0, this.dread - (charging ? 0.22 : 0.12));
     // It does not go now. It goes somewhere inside the next second of the torch
@@ -1405,6 +1998,7 @@ export class Director {
       reach: 0,
       speed: HUNTER.approachSpeed,
       lastStepPhase: 0,
+      lastStepDist: Math.hypot(spot.x - p.x, spot.y - p.y),
       nextChargeAt: 0,      // it may run the moment it is in range
       chargeOmenAt: 0,
       windUntil: 0,
@@ -1414,8 +2008,8 @@ export class Director {
       resnapAt: 0,
     };
 
-    const rel = wrapAngle(Math.atan2(spot.y - p.y, spot.x - p.x) - p.angle);
-    this.audio.playHunterCall(0.62, clamp(Math.sin(rel), -1, 1));
+    const { pan, rel } = this._spatialAt(spot.x, spot.y);
+    this.audio.playHunterCall(0.62, pan, rel);
     this.dread = Math.min(HORROR.dreadMax, this.dread + 0.10);
 
     // The "run" line does NOT happen here any more, for two reasons. It fired
@@ -1436,7 +2030,6 @@ export class Director {
 
     let dx = p.x - h.x, dy = p.y - h.y;
     let dist = Math.hypot(dx, dy);
-    const bearing = Math.atan2(dy, dx);
 
     // The one line of instruction the game ever gives, and the ability it refers
     // to, handed over together and only ever once — at the moment the thing is
@@ -1563,21 +2156,32 @@ export class Director {
     // There is a trickle of idle phase on top so that standing still is a slow
     // shift of weight rather than a freeze-frame.
     h.phase += moved * HUNTER.strideRate + dt * 0.5;
+    const spatial = this._spatialAt(h.x, h.y);
     const stepIndex = Math.floor(h.phase / Math.PI);
     if (stepIndex !== h.lastStepPhase) {
       h.lastStepPhase = stepIndex;
       if (dist < HUNTER.stepDistance) {
-        const rel = wrapAngle(bearing - p.angle);
         // Falls off much more slowly than the creature's step, so the first
         // thing you get is the sound of something enormous a long way off.
         const vol = clamp(0.75 / (1 + dist * 0.10), 0.06, 0.75);
-        if (!this._isSilent()) this.audio.playHunterStep(clamp(Math.sin(rel), -1, 1), vol);
+        const closing = dist < (h.lastStepDist ?? dist) - 0.04;
+        // In the last three units, a hunter closing from behind abruptly loses
+        // its room tail. The dry impact is the proximity tell; it never touches
+        // the master muffle used by the silence anomaly.
+        const reverbSend = hunterStepReverb(spatial.rel, dist, closing);
+        if (!this._isSilent()) {
+          this.audio.playHunterStep(
+            spatial.pan, vol, spatial.rel, reverbSend
+          );
+        }
+        h.lastStepDist = dist;
       }
     }
 
-    const rel = wrapAngle(bearing - p.angle);
     const near = clamp(1 - dist / HUNTER.breathDistance, 0, 1);
-    this.audio.setBreath(near * (h.mode === 'charge' ? 2 : 1.2), clamp(Math.sin(rel), -1, 1));
+    this.audio.setBreath(
+      near * (h.mode === 'charge' ? 2 : 1.2), spatial.pan, spatial.rel
+    );
     this.audio.setHeartbeat(clamp(0.35 + near * 1.1, 0, 1));
     fx.stress = Math.max(fx.stress, near * (h.mode === 'charge' ? 1 : 0.6));
     fx.fogDensity *= 1 + near * 0.30;
@@ -1724,33 +2328,27 @@ export class Director {
       return { x: this.pendingRitual.cx, y: this.pendingRitual.cy, kind: 'ritual' };
     }
     if (this.creature) return { x: this.creature.x, y: this.creature.y, kind: 'creature' };
-    return null;
+    // Last fallback: a room that can still perform its authored event. This
+    // keeps swarm available after the gun is picked up and turns its existing
+    // directional wave into a ritual compass.
+    return this._nearestLandmarkTarget(RITUAL_GUIDE.radius, true);
   }
 
   _crowdTarget() {
     if (this.gunSite && !this.gunSite.pickedUp) {
       return { x: this.gunSite.x, y: this.gunSite.y, kind: 'gun' };
     }
-    // An unused gun anchor is also a walkable point inside a recognisable room.
-    // Lead the player there and entering the block arms its own landmark event.
-    const anchor = this.world.nearestAnchor(
-      this.player.x, this.player.y, GUN.anchorRadius + 6, GUN_ANCHOR
+    // The congregation is allowed to reuse a landmark. Requiring "unused" made
+    // its eligibility shrink as the player explored, which is exactly backwards
+    // for the ending that already has the longest tail.
+    return this._nearestLandmarkTarget(
+      ANOMALIES.crowd.targetRadius, false
     );
-    if (!anchor) return null;
-    const landmark = this.world.landmarkAt(anchor.cx, anchor.cy);
-    if (!landmark) return null;
-    const center = this.world.blockCenter(anchor.cx, anchor.cy);
-    const key = `${Math.floor(center.x)},${Math.floor(center.y)}`;
-    if (this.landmarksUsed.has(key)) return null;
-    return {
-      x: anchor.cx + 0.5, y: anchor.cy + 0.5,
-      kind: 'ritual', landmark,
-    };
   }
 
   _buildCrowdRoute(a, target) {
     const path = this._pathBetween(
-      this.player.x, this.player.y, target.x, target.y, 4096
+      this.player.x, this.player.y, target.x, target.y, 8192
     );
     if (!path || path.length < 3) return false;
 
@@ -1891,7 +2489,9 @@ export class Director {
         this.audio.playDrone({ freq: 39, dur: a.dur, volume: 0.14 });
         this.audio.playWhisper({ pan: -0.7, volume: 0.10 });
         const rel = wrapAngle(targetBearing - p.angle);
-        this.audio.playWhisper({ pan: clamp(Math.sin(rel), -1, 1), volume: 0.12 });
+        this.audio.playWhisper({
+          pan: clamp(Math.sin(rel), -1, 1), rel, volume: 0.12,
+        });
         break;
       }
       case 'redshift':
@@ -1931,10 +2531,13 @@ export class Director {
       return;
     }
 
+    // NO DREAD GATE ON THIS ONE. Redshift is gated at 0.30 as a random anomaly,
+    // and landmark rituals are the earliest authored thing that happens to you —
+    // so the colour that is supposed to teach you "something is about to happen
+    // here" was silent for exactly the events that would have taught it. The
+    // gate stays on the anomaly bag; the omen does not use it.
     const pending = this.pendingRitual;
-    if (pending && !pending.redshifted &&
-        pending.at - this.elapsed <= lead &&
-        this.dread >= ANOMALIES.redshift.gate) {
+    if (pending && !pending.redshifted && pending.at - this.elapsed <= lead) {
       if (this._startAnomaly('redshift', 'ritual')) pending.redshifted = true;
     }
   }
@@ -2455,8 +3058,50 @@ export class Director {
     }
   }
 
+  _scheduleRitualGuide(range = RITUAL_GUIDE.cueEvery) {
+    this.nextRitualGuideAt = this.elapsed + this._rand(range[0], range[1]);
+  }
+
+  _updateRitualGuide(time) {
+    if (this.elapsed < this.nextRitualGuideAt || this.grace >= 1) return;
+    // Do not talk over a real event or over the pistol, whose clink uses the same
+    // directional vocabulary and has a more immediate job.
+    if ((this.gunSite && !this.gunSite.pickedUp) || this.gunRevealPending ||
+        this.ritual || this.pendingRitual ||
+        this.creature || this.hunter || this.anomaly || this._isSilent()) {
+      this._scheduleRitualGuide(RITUAL_GUIDE.busyRetry);
+      return;
+    }
+
+    const target = this._nearestLandmarkTarget(RITUAL_GUIDE.radius, true);
+    if (!target) {
+      this._scheduleRitualGuide();
+      return;
+    }
+    const { pan, rel } = this._spatialAt(target.x, target.y);
+    this._playGunLandmarkCue(target, pan, rel);
+    if (!this.phantom && target.distance <= RITUAL_GUIDE.footstepRadius &&
+        this.rng() < RITUAL_GUIDE.phantomChance) {
+      this._startPhantomGuide(target, time, 'landmark');
+    }
+    this._scheduleRitualGuide();
+  }
+
   _updateGun(fx, time, dt) {
-    this._trySpawnGun();
+    // After enough missed sites, stop being subtle. A few hard flashlight cuts
+    // announce that the rules have changed; during one of the black frames the
+    // gun is placed almost directly ahead.
+    if (!this.gunSite && !this.hasGun && !this.gunRevealPending &&
+        this.elapsed >= this.nextGunTryAt &&
+        this.gunPlacements >= GUN.patienceRuns) {
+      this.gunRevealPending = true;
+      this._startStutter(() => {
+        this.gunRevealPending = false;
+        this._trySpawnGun(true, true);
+      }, 0.65);
+    } else if (!this.gunRevealPending) {
+      this._trySpawnGun();
+    }
     this._updateShells(dt);
 
     // Holes and brass accumulate for a whole session, so only submit the ones
@@ -2477,9 +3122,9 @@ export class Director {
     const dist = Math.hypot(site.x - this.player.x, site.y - this.player.y);
     const age = this.elapsed - site.spawnedAt;
 
-    // A player who has made measurable progress has understood the clue. Taking
-    // the gun away after that would turn a discovery into a timer they were
-    // never told about, so a committed site no longer expires.
+    // A player who has made measurable progress has probably understood the
+    // clue, so give that placement longer. It still has a hard deadline: an
+    // accidental half-turn must never strand the only weapon beyond earshot.
     site.closestDist = Math.min(site.closestDist, dist);
     if (!site.committed && site.initialDist - site.closestDist >= GUN.progressLock) {
       site.committed = true;
@@ -2498,22 +3143,9 @@ export class Director {
     // If the clinks were not enough, footsteps begin behind the player, cross
     // their position, and stop at the gun. They wait for an unrelated phantom
     // to finish instead of replacing it halfway through a step.
-    if (!site.footstepsUsed && age >= GUN.footstepsAfter && !this.phantom) {
-      const dx = site.x - this.player.x, dy = site.y - this.player.y;
-      const d = Math.hypot(dx, dy) || 1;
-      const ux = dx / d, uy = dy / d;
-      const cross = (this.rng() - 0.5) * 0.8;
-      site.footstepsUsed = true;
-      this.phantom = {
-        mode: 'gunGuide',
-        srcX: this.player.x - ux * 2.4 - uy * cross,
-        srcY: this.player.y - uy * 2.4 + ux * cross,
-        targetX: site.x,
-        targetY: site.y,
-        step: 0.58,
-        stepsLeft: Math.ceil((d + 2.4) / 0.58) + 2,
-        nextStep: time + 0.2,
-      };
+    if (!site.pickedUp && !site.footstepsUsed &&
+        age >= GUN.footstepsAfter && !this.phantom) {
+      site.footstepsUsed = this._startPhantomGuide(site, time, 'gun');
     }
 
     // It keeps announcing itself. You cannot watch it arrive, so the clink is
@@ -2523,8 +3155,8 @@ export class Director {
     if (!site.pickedUp && this.elapsed >= site.nextCue && dist < 20) {
       site.cues = (site.cues || 0) + 1;
       site.nextCue = this.elapsed + Math.min(18, GUN.cueEvery * (1 + site.cues * GUN.cueGrowth));
-      const rel = wrapAngle(Math.atan2(site.y - this.player.y, site.x - this.player.x) - this.player.angle);
-      this.audio.playShellDrop(clamp(Math.sin(rel), -1, 1));
+      const { pan, rel } = this._spatialAt(site.x, site.y);
+      this.audio.playShellDrop(pan, rel);
     }
 
     if (!site.pickedUp && dist <= GUN.proximity) {
@@ -2534,7 +3166,8 @@ export class Director {
       if (this.onGunPickup) this.onGunPickup(site);
     }
 
-    if (!site.pickedUp && !site.committed && age > GUN.visibleFor) {
+    const expiresAfter = site.committed ? GUN.committedFor : GUN.visibleFor;
+    if (!site.pickedUp && age > expiresAfter) {
       this.gunSite = null;
       this.nextGunTryAt = this.elapsed + GUN.respawnAfter;
       return;
@@ -2557,7 +3190,7 @@ export class Director {
     }
   }
 
-  _trySpawnGun(force = false) {
+  _trySpawnGun(force = false, reveal = false) {
     if (!force && (this.gunSite || this.hasGun || this.elapsed < this.nextGunTryAt)) return false;
     if (force) this.gunSite = null;
 
@@ -2566,7 +3199,7 @@ export class Director {
     // discovery rather than a handout, but after a few sites you have missed it
     // is just the game hiding the only object that matters, so from then on it
     // will happily turn up in front of you.
-    const patient = this.gunPlacements < GUN.patienceRuns;
+    const patient = !reveal && this.gunPlacements < GUN.patienceRuns;
     const behind = (cx, cy) => !patient ||
       Math.abs(wrapAngle(Math.atan2(cy + 0.5 - p.y, cx + 0.5 - p.x) - p.angle)) >= GUN.spawnBehind;
     let best = null;
@@ -2575,23 +3208,27 @@ export class Director {
     // floor of the ward, or on the chapel plinth, is somewhere you can find
     // again and somewhere you will remember finding — which is worth far more
     // than the couple of metres of extra walking it costs.
-    const anchor = this.world.nearestAnchor(p.x, p.y, GUN.anchorRadius, GUN_ANCHOR);
-    if (anchor && this._canPlaceGun(anchor.cx, anchor.cy) && behind(anchor.cx, anchor.cy)) {
-      best = { ...anchor, landmark: this.world.landmarkAt(anchor.cx, anchor.cy) };
+    if (!reveal) {
+      const anchor = this.world.nearestAnchor(p.x, p.y, GUN.anchorRadius, GUN_ANCHOR);
+      if (anchor && this._canPlaceGun(anchor.cx, anchor.cy) && behind(anchor.cx, anchor.cy)) {
+        best = { ...anchor, landmark: this.world.landmarkAt(anchor.cx, anchor.cy) };
+      }
     }
 
     // Otherwise: behind you. Watching a pistol appear on the carpet ten metres
     // ahead is a spawn; turning round and finding one you walked straight past
     // is a discovery. Once patience has run out the order reverses and it goes
     // out in front, where you cannot fail to walk into it.
-    const offsets = patient
-      ? [Math.PI, -Math.PI * 0.80, Math.PI * 0.80,
-         -Math.PI * 0.62, Math.PI * 0.62, -Math.PI * 0.46, Math.PI * 0.46]
-      : [0, -0.34, 0.34, -0.7, 0.7, Math.PI, -Math.PI * 0.7, Math.PI * 0.7];
+    const offsets = reveal
+      ? [0, -0.12, 0.12, -0.28, 0.28]
+      : patient
+        ? [Math.PI, -Math.PI * 0.80, Math.PI * 0.80,
+           -Math.PI * 0.62, Math.PI * 0.62, -Math.PI * 0.46, Math.PI * 0.46]
+        : [0, -0.34, 0.34, -0.7, 0.7, Math.PI, -Math.PI * 0.7, Math.PI * 0.7];
     for (const off of offsets) {
       for (let i = 0; i < 8 && !best; i++) {
         const ang = p.angle + off + this._rand(-0.2, 0.2);
-        const dist = this._rand(GUN.spawnMin, GUN.spawnMax);
+        const dist = reveal ? this._rand(2.6, 4.2) : this._rand(GUN.spawnMin, GUN.spawnMax);
         const cx = Math.floor(p.x + Math.cos(ang) * dist);
         const cy = Math.floor(p.y + Math.sin(ang) * dist);
         if (this._canPlaceGun(cx, cy) && behind(cx, cy)) best = { cx, cy };
@@ -2617,7 +3254,7 @@ export class Director {
     }
 
     if (!best) {
-      if (!force) this.nextGunTryAt = this.elapsed + 2;
+      this.nextGunTryAt = this.elapsed + 2;
       return false;
     }
     const seed = (this.rng() * 0xffffffff) >>> 0;
@@ -2656,31 +3293,34 @@ export class Director {
     };
     // Since you cannot see it land, you get to hear it: metal on carpet, panned
     // to where it is. That is the whole invitation to turn around.
-    const rel = wrapAngle(Math.atan2(this.gunSite.y - p.y, this.gunSite.x - p.x) - p.angle);
-    const pan = clamp(Math.sin(rel), -1, 1);
-    this.audio.playShellDrop(pan);
+    const { pan, rel } = this._spatialAt(this.gunSite.x, this.gunSite.y);
+    this.audio.playShellDrop(pan, rel);
     this.audio.quietBeat({ target: 0.19, attack: 0.16, hold: 1.15, release: 1.5 });
-    this._playGunLandmarkCue(this.gunSite, pan);
+    this._playGunLandmarkCue(this.gunSite, pan, rel);
     return true;
   }
 
-  _playGunLandmarkCue(site, pan) {
+  _playGunLandmarkCue(site, pan, rel = null) {
     switch (site.landmark) {
       case 'ward':
-        this.audio.playDistantBang(pan);
+        this.audio.playDistantBang(pan, rel);
         break;
       case 'atrium':
-        this.audio.playDrone({ freq: 43, dur: 2.6, volume: 0.11 });
+        this.audio.playDrone({ freq: 43, dur: 2.6, volume: 0.11, pan, rel });
         break;
       case 'shaft':
-        this.audio.playPitDraft(pan, 0.22);
+        this.audio.playPitDraft(pan, 0.22, rel);
         break;
       case 'combs':
-        this.audio.playWhisper({ pan: clamp(pan - 0.2, -1, 1), volume: 0.07 });
-        this.audio.playWhisper({ pan: clamp(pan + 0.2, -1, 1), volume: 0.07 });
+        this.audio.playWhisper({
+          pan: clamp(pan - 0.2, -1, 1), rel, volume: 0.07,
+        });
+        this.audio.playWhisper({
+          pan: clamp(pan + 0.2, -1, 1), rel, volume: 0.07,
+        });
         break;
       case 'chapel':
-        this.audio.playDistantCall(0.28, pan);
+        this.audio.playDistantCall(0.28, pan, rel);
         break;
     }
   }
@@ -2703,6 +3343,17 @@ export class Director {
     if (this.player.falling || this.player.dead) return;
     if (!this.doorSite && this.elapsed >= this.nextDoorTryAt) this._tryPlaceDoor();
     const site = this.doorSite;
+
+    // AIR WITH NOTHING AT THE END OF IT. Past WITNESS.airAt the building starts
+    // moving air, from a bearing that is different every time and is therefore
+    // not a bearing at all. It is the only cue in the game that leads nowhere
+    // on purpose: what it teaches is the SOUND, so that when a door does turn
+    // up and announces itself with the same draught from a fixed direction, the
+    // player already knows what they are hearing and goes.
+    if (!site && this.grace >= WITNESS.airAt && this.elapsed >= this.nextAirAt) {
+      this.nextAirAt = this.elapsed + this._rand(WITNESS.airEvery[0], WITNESS.airEvery[1]);
+      this.audio.playDraught(this._rand(-0.85, 0.85), WITNESS.airVolume);
+    }
     if (!site) return;
 
     const p = this.player;
@@ -2719,9 +3370,10 @@ export class Director {
     if (this.elapsed >= site.nextCue && dist < 22) {
       site.cues++;
       site.nextCue = this.elapsed + Math.min(16, DOOR.cueEvery * (1 + site.cues * DOOR.cueGrowth));
-      const rel = wrapAngle(Math.atan2(site.y - p.y, site.x - p.x) - p.angle);
-      this.audio.playDraught(clamp(Math.sin(rel), -1, 1),
-        clamp(0.30 / (1 + dist * 0.06), 0.07, 0.30));
+      const { pan, rel } = this._spatialAt(site.x, site.y);
+      this.audio.playDraught(
+        pan, clamp(0.30 / (1 + dist * 0.06), 0.07, 0.30), rel
+      );
     }
 
     // Air moves toward a gap, and once the draught has been ignored for a while
@@ -2730,8 +3382,8 @@ export class Director {
     // a thing happening in the world rather than a marker over it.
     if (age >= DOOR.trailAfter && this.elapsed >= (site.nextPull || 0)) {
       site.nextPull = this.elapsed + this._rand(4.5, 8.0);
-      const rel = wrapAngle(Math.atan2(site.y - p.y, site.x - p.x) - p.angle);
-      this.audio.playWhisper({ pan: clamp(Math.sin(rel), -1, 1), volume: 0.05 });
+      const { pan, rel } = this._spatialAt(site.x, site.y);
+      this.audio.playWhisper({ pan, rel, volume: 0.05 });
     }
 
     if (dist <= DOOR.proximity) { this._enterDoor(); return; }
@@ -2830,12 +3482,11 @@ export class Director {
       closestDist: initialDist,
       committed: false,
     };
-    const rel = wrapAngle(Math.atan2(y - p.y, x - p.x) - p.angle);
-    const pan = clamp(Math.sin(rel), -1, 1);
+    const { pan, rel } = this._spatialAt(x, y);
     // The building goes quiet around it for a moment. Everything else that has
     // ever arrived did so over the top of the room tone; this makes a hole in
     // it, which is the only way a *door* could possibly announce itself.
-    this.audio.playDraught(pan, 0.30);
+    this.audio.playDraught(pan, 0.30, rel);
     this.audio.quietBeat({ target: 0.14, attack: 0.5, hold: 1.6, release: 2.2 });
     if (this.onDoor) this.onDoor(this.doorSite);
     return true;

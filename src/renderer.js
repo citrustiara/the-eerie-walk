@@ -38,7 +38,7 @@ import { METER } from './mesh.js';
 import { fbm } from './noise.js';
 import {
   FS, FTILE, WALL_W, WALL_H, WTILE, PITS, PIT_TILE, UP_W, UP_H, UP_SPAN, UP_TOP,
-  SKY_W, SKY_H,
+  SKY_W, SKY_H, TERRAIN_W, TERRAIN_H, TERRAIN_SCALE,
 } from './textures.js';
 import { CEIL_HEIGHT, CEIL_LOW, CEIL_STD, CEIL_HIGH, CEIL_OPEN } from './world.js';
 
@@ -92,10 +92,17 @@ const MESH_GRAIN = 64;
 // twenty-six metres out — see _setViewDistance.
 const DMAX = 26, DN = 1024;
 const R2MAX = 12, BN = 2048, R2_SCALE = BN / R2MAX;
-// What a puddle shows you. Not the horizon — the sky overhead, which is a good
-// deal bluer, so standing water stays readable against haze that is resolving
-// to the pale colour at the bottom of the sky.
-const PUDDLE_SKY = [78, 88, 116];
+// WHAT STANDING WATER SHOWS YOU. It used to be one constant blue-grey, which is
+// what you do when there is no sky to sample; there is one now, so water
+// reflects it properly — see the mirror in the floor pass. The elevation of the
+// reflected ray is the depression of the row, which for a mirror at z = 0 is
+// exactly the same angle the other way up, so one row of the sky texture
+// answers a whole row of water and the treeline lands in the flood upside down.
+//
+// This is the single cheapest thing in the renderer that reads as expensive.
+const MIRROR_BASE = 0.33;       // reflectance underfoot...
+const MIRROR_GRAZE = 0.64;      // ...and how much more of it at the horizon
+const MIRROR_ROWS = 0.42;       // fraction of a screen height it falls off over
 
 function edge(ax, ay, bx, by, px, py) {
   return (px - ax) * (by - ay) - (py - ay) * (bx - ax);
@@ -152,7 +159,9 @@ export class Renderer {
 
     // --- Vignette (radial edge darkening) ---------------------------------
     this.vign = new Float32Array(W * H);
+    this.vignSide = new Float32Array(W);
     const cx = W / 2, cy = H / 2, maxR2 = cx * cx + cy * cy;
+    for (let x = 0; x < W; x++) this.vignSide[x] = (x - cx) / cx;
     for (let y = 0; y < H; y++) {
       for (let x = 0; x < W; x++) {
         const dx = x - cx, dy = y - cy;
@@ -199,10 +208,12 @@ export class Renderer {
   // colour (OUTSIDE.horizon), so everything on the ground recedes into exactly
   // the value the air above the treeline already has, and the two meet without
   // a seam. Fogging the sky as well would just wash the whole thing flat.
-  _drawSky(env, horizon, ceilY1, rdx0, rdy0, rdx1, rdy1) {
-    const buf = this.buf, sky = this.tex.sky;
-    if (!sky) return;
-    const data = sky.data, skyU = this.skyU;
+  // Which column of the sky each column of the screen is looking at. One atan2
+  // per column, and two passes want the answer — the water reflects the same
+  // sky the band above the roofline is drawn from, and they must agree exactly
+  // or the treeline and its reflection will point different ways.
+  _skyColumns(rdx0, rdy0, rdx1, rdy1) {
+    const skyU = this.skyU;
     const INV = SKY_W / (Math.PI * 2);
     for (let x = 0; x < W; x++) {
       const t = x / W;
@@ -212,6 +223,14 @@ export class Renderer {
       if (u >= SKY_W) u = SKY_W - 1;
       skyU[x] = u;
     }
+  }
+
+  _drawSky(env, horizon, ceilY1, rdx0, rdy0, rdx1, rdy1) {
+    const buf = this.buf, sky = this.tex.sky;
+    if (!sky) return;
+    const data = sky.data, skyU = this.skyU;
+    // Already filled by the floor pass this frame — it needs the same bearings
+    // for the reflection and runs first.
     // It goes on getting lighter for as long as you stand there. Nothing else
     // about the sky ever changes — no drift, no twinkle — and the stillness is
     // the only thing out here that is still wrong.
@@ -357,10 +376,17 @@ export class Renderer {
     const eye = Math.max(0.02, player.eyeZ == null ? PLAYER.eyeHeight : player.eyeZ);
 
     // Flashlight beam parameters (screen-space cone aimed at the crosshair,
-    // with a lazy idle sway so the light feels handheld).
+    // with a lazy idle sway so the light feels handheld). A close threat shifts
+    // it a few pixels AWAY from the source: the hand flinches, the HUD does not
+    // point.
     const swayX = Math.sin(env.time * LIGHT.flashlightSwaySpeed) * LIGHT.flashlightSwayAmount;
     const swayY = Math.cos(env.time * LIGHT.flashlightSwaySpeed * 0.7) * LIGHT.flashlightSwayAmount * 0.6;
-    const beamCX = W * 0.5 + swayX + player.bobRoll * 2;
+    const threatBias = Number.isFinite(env.threatRel)
+      ? clamp((env.threatNear || 0) * (env.stress || 0), 0, 1)
+      : 0;
+    const threatFlinch = Math.sin(env.threatRel || 0) *
+      LIGHT.flashlightThreatFlinch * threatBias;
+    const beamCX = W * 0.5 + swayX + player.bobRoll * 2 - threatFlinch;
     // Pitch moves the projected horizon, not the player's screen-space aim.
     // Keeping the beam on the crosshair lets the expanded vertical range light
     // the floor and ceiling instead of throwing the torch cone off-screen.
@@ -408,9 +434,20 @@ export class Renderer {
     const panelEmit = env.panelEmissive || 0;
     const anyPits = world.anyPitNear(posX, posY);
     const pitK = 1 + PIT.depth / eye;
-    // Standing water. It is the only thing below the horizon that shows you the
-    // sky, and it is most of what stops the ground reading as a brown plane.
-    const pudR = PUDDLE_SKY[0], pudG = PUDDLE_SKY[1], pudB = PUDDLE_SKY[2];
+
+    // The field. Two things the building never needed: a second ground layer at
+    // the scale of a landscape (see terrainTexture — the tiling one repeats
+    // eighteen times before the horizon out here), and water that reflects.
+    //
+    // The bearings the sky is sampled by are wanted by both this pass and the
+    // sky pass below it, and they cost a per-column atan2, so they are computed
+    // once up here rather than once each.
+    const terrain = outside ? tex.terrain.data : null;
+    const region = outside ? world.outside : null;
+    const skyData = outside ? tex.sky.data : null;
+    const skyLift = env.skyLift == null ? 1 : env.skyLift;
+    if (outside) this._skyColumns(rdx0, rdy0, rdx1, rdy1);
+    const skyU = this.skyU;
 
     // The horizon is allowed to leave the screen entirely — pitch swings well
     // past a 270 px buffer — so both halves are clamped rather than assumed.
@@ -431,6 +468,21 @@ export class Renderer {
 
       const rowBase = y * W;
       const pitDist = rowDist * pitK;
+
+      // Everything the water on this row needs, computed once for the row: how
+      // much of the sky it shows (grazing rows show nearly all of it, the row
+      // between your boots shows almost none), and WHICH row of the sky, which
+      // is the reflection of this row's depression back above the horizon.
+      let mirror = 0, reflRow = 0;
+      if (outside) {
+        const below = y - horizon;
+        const graze = clamp(1 - below / (H * MIRROR_ROWS), 0, 1);
+        mirror = MIRROR_BASE + MIRROR_GRAZE * graze * graze;
+        let sy = (Math.atan2(below, H) * (2 / Math.PI) * (SKY_H - 1)) | 0;
+        if (sy < 0) sy = 0; else if (sy >= SKY_H) sy = SKY_H - 1;
+        reflRow = sy * SKY_W;
+      }
+
       for (let x = 0; x < W; x++) {
         // Is the floor here actually missing? Everywhere with no hole in sight
         // anyPits is false and this whole branch is one compare per pixel.
@@ -445,14 +497,40 @@ export class Renderer {
         const ty = ((fy * FSCALE + FBIAS) | 0) & FMASK;
         const texel = floorTex[ty * FS + tx];
         let tr = texel & 255, tg = (texel >> 8) & 255, tb = (texel >> 16) & 255;
-        // The alpha byte of the ground is standing water — see groundTexture.
-        // Nothing else in the game uses the floor's fourth channel, so this
-        // costs one compare per pixel and only outside.
         if (outside) {
-          const wet = texel >>> 24;
-          if (wet) {
-            const k = wet / 320;               // never a mirror; it is a puddle
-            tr += (pudR - tr) * k; tg += (pudG - tg) * k; tb += (pudB - tb) * k;
+          // Kept before the modulation below, and used to riffle the water. A
+          // mirror of constant strength is a sheet of glass, and a flood on a
+          // ploughed field is nothing like glass: it is broken by the ground
+          // under it and by whatever the wind is doing. Reusing the ground's
+          // own noise for that is free, and it is even the right noise — the
+          // riffle IS the ground showing through.
+          const riffle = 0.50 + tg * 0.0085;
+          // The landscape layer, modulating the boot-scale one. 128 is neutral,
+          // so this is a tint and a shade and never a replacement — every tuft
+          // and every ruck in the tiling ground survives it.
+          let mx = ((fx - region.x0) * TERRAIN_SCALE) | 0;
+          let my = ((fy - region.y0) * TERRAIN_SCALE) | 0;
+          if (mx < 0) mx = 0; else if (mx >= TERRAIN_W) mx = TERRAIN_W - 1;
+          if (my < 0) my = 0; else if (my >= TERRAIN_H) my = TERRAIN_H - 1;
+          const macro = terrain[my * TERRAIN_W + mx];
+          tr = tr * (macro & 255) * (1 / 128);
+          tg = tg * ((macro >> 8) & 255) * (1 / 128);
+          tb = tb * ((macro >> 16) & 255) * (1 / 128);
+
+          // Water. The macro layer's alpha is the flood — the stream, the
+          // hollows it has got into — and the tiling layer's alpha is the
+          // puddles standing in the ruts, which are worth much less because
+          // they are two inches deep and mostly show you their own bottom.
+          const flood = macro >>> 24;
+          const puddle = texel >>> 24;
+          const wet = flood > puddle * 0.45 ? flood / 255 : puddle / 566;
+          if (wet > 0.004) {
+            let k = mirror * wet * riffle;
+            if (k > 0.97) k = 0.97;
+            const s = skyData[reflRow + skyU[x]];
+            tr += ((s & 255) * skyLift - tr) * k;
+            tg += (((s >> 8) & 255) * skyLift - tg) * k;
+            tb += (((s >> 16) & 255) * skyLift - tb) * k;
           }
         }
         buf[rowBase + x] = lit(x, y, rowDist, tr, tg, tb);
@@ -634,7 +712,7 @@ export class Renderer {
       // any. Sampled at the decal's own, higher resolution.
       const hitFace = side === 0 ? (stepX > 0 ? 0 : 1) : (stepY > 0 ? 2 : 3);
       const bdata = world.bloodWallFace(mapX, mapY) === hitFace
-        ? this.bloodDecals.get(mapX, mapY, hitFace).data
+        ? this.bloodDecals.get(mapX, mapY, hitFace, world.bloodWallStyle(mapX, mapY)).data
         : null;
       const dTexX = bdata ? ((wallU - Math.floor(wallU)) * DS) | 0 : 0;
 
@@ -1052,6 +1130,27 @@ export class Renderer {
       g += wave * 0.65 + stain * 0.35 + grain;
       b += wave * 0.25 + stain * 0.18 + grain * 0.7;
       if (plank) { r *= 0.55; g *= 0.50; b *= 0.45; }
+    } else if (mat === 'bark') {
+      // Vertical fissures, deep and irregular. The direction is the whole point:
+      // every other material in here is either flat or horizontally banded, and
+      // a hard vertical grain is what makes a trunk read as a trunk at the six
+      // or seven pixels of width one gets from thirty metres away.
+      const fissure = fbm(sx * 0.02, sy * 0.30, 3);
+      const ridge = Math.sin(tx * 1.9 + fissure * 7) * 13;
+      r += ridge + stain * 0.30 + grain * 0.8;
+      g += ridge * 0.92 + stain * 0.26 + grain * 0.8;
+      b += ridge * 0.78 + stain * 0.20 + grain * 0.7;
+      if (fissure > 0.60) { r *= 0.62; g *= 0.63; b *= 0.66; }
+      // Wet on one side of everything. It rained on this place and it is not
+      // over — the only weather the game ever states.
+      if (fissure < 0.30) { r *= 0.86; g *= 0.88; b *= 0.94; }
+    } else if (mat === 'stone') {
+      const grit = hash2(sx * 7, sy * 7) > 0.80 ? 20 : 0;
+      const vein = fbm(sx * 0.10, sy * 0.10, 2);
+      r += grit + grain * 0.7 + stain * 0.15;
+      g += grit + grain * 0.7 + stain * 0.15;
+      b += grit + grain * 0.75 + stain * 0.20;
+      if (vein > 0.58) { r *= 0.82; g *= 0.84; b *= 0.88; }
     } else if (mat === 'metal') {
       const band = (ty % 18) < 2;
       const scrape = hash2((sx / 2) | 0, (sy / 8) | 0) > 0.78 ? 22 : 0;
@@ -1461,12 +1560,18 @@ export class Renderer {
 
   _post(env) {
     const buf = this.buf, out = this.out, vign = this.vign, grain = this.grain;
+    const vignSide = this.vignSide;
     const N = W * H;
     const gOff = (Math.random() * N) | 0;
     const scare = env.scare || 0;
     const grainAmt = POST.grain * (1 + scare * 4 + (env.stress || 0) * 1.6);
     const scan = 1 - POST.scanlineDarken;
     const chroma = (POST.chromaShift + (scare * 5 | 0) + ((env.stress || 0) * 3 | 0)) | 0;
+    const threatBias = Number.isFinite(env.threatRel)
+      ? clamp((env.threatNear || 0) * (env.stress || 0), 0, 1)
+      : 0;
+    const hasThreatBias = threatBias > 0;
+    const threatSide = threatBias > 0 ? Math.sin(env.threatRel) : 0;
     // Colour grade: the redshift anomaly and the caught-you scare both push the
     // whole frame toward arterial.
     const grade = env.grade || null;
@@ -1504,9 +1609,18 @@ export class Renderer {
           const c = buf[sidx];
           r = c & 255; g = (c >> 8) & 255; b = (c >> 16) & 255;
         }
-        const v = vign[idx] * scanMul;
+        // Lean the frame without drawing a marker. The half of the vignette the
+        // pursuer occupies gets darker and rougher as stress rises; shifting the
+        // bright centre the other way is what makes its side close in.
+        let localThreat = 0;
+        let v = vign[idx] * scanMul;
+        if (hasThreatBias) {
+          localThreat = Math.max(0, vignSide[x] * threatSide) * threatBias;
+          v *= 1 - localThreat * POST.threatVignette;
+        }
         let gi = idx + gOff; if (gi >= N) gi -= N;
-        const gn = grain[gi] * grainAmt;
+        const gn = grain[gi] * grainAmt * (hasThreatBias
+          ? 1 + localThreat * POST.threatGrain : 1);
         r = (r * v * gr + gn + flashWash) * dark;
         g = (g * v * gg + gn + flashWash * 0.85) * dark;
         b = (b * v * gb + gn + flashWash * 0.62) * dark;

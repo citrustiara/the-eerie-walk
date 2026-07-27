@@ -1,0 +1,9 @@
+{
+  "name": "the-eerie-walk",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node scripts/verify-improvements.mjs",
+    "measure": "node scripts/measure-balance.mjs"
+  }
+}

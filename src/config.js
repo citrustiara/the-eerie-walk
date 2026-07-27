@@ -138,6 +138,10 @@ export const LIGHT = {
   beamColor: [255, 244, 214], // warm fluorescent-ish white
   flashlightSwayAmount: 5.0,  // pixels of lazy beam sway
   flashlightSwaySpeed: 1.3,
+  // Inside ten units the nearest pursuer nudges the hand-held beam away from
+  // its bearing. At full stress this is still only a few low-res pixels: a
+  // flinch, not a pointer.
+  flashlightThreatFlinch: 9.0,
 };
 
 export const FOG = {
@@ -150,6 +154,8 @@ export const POST = {
   grain: 14,                // +/- luminance of the film grain
   scanlineDarken: 0.10,     // how much alternating rows are dimmed
   chromaShift: 1,           // px of RGB split for the VHS bleed (0 disables)
+  threatVignette: 0.20,     // extra edge darkening on the pursuer's side
+  threatGrain: 0.55,        // ...and local grain there, both scaled by stress
 };
 
 export const AUDIO = {
@@ -166,6 +172,33 @@ export const AUDIO = {
 export const DECALS = {
   bloodWallChance: 0.022,   // fraction of solid wall cells bearing a smear
   size: 128,                // decal resolution; walls are 64, blood gets detail
+
+  // ...and what happens on the walls of the rooms that were drawn by hand.
+  //
+  // A flat 2.2% everywhere with the archetype rolled from fixed weights meant
+  // the six events blood can record were scattered uniformly across an infinite
+  // building — so the tally, the one archetype that says a PERSON was in here
+  // for a long time, came up once in twenty-one smears at a random spot in a
+  // random corridor and meant nothing wherever it landed. Inside a landmark the
+  // wall is much more likely to be marked, and it is marked with the thing that
+  // happened in that particular room:
+  //
+  //   ward    handprints and drag. People were moved down that corridor, and
+  //           some of them held on to the walls on the way.
+  //   chapel  tally. Somebody knelt in here and counted, and this is now the
+  //           only place in the building you will ever see them do it.
+  //   shaft   soak, running down toward the hole it all went into.
+  //   atrium  spray, thrown across the faces of the core.
+  //   combs   nothing. Not "less" — nothing. It is the one room whose horror is
+  //           that there is no mark anywhere in it to tell one row from the
+  //           next, and a smear would be a landmark inside the landmark.
+  landmark: {
+    ward:   { chance: 0.15, kinds: ['handprints', 'drag'], age: [0.0, 0.42] },
+    chapel: { chance: 0.13, kinds: ['tally'], age: [0.45, 1.0] },
+    shaft:  { chance: 0.11, kinds: ['soak'], age: [0.1, 0.6] },
+    atrium: { chance: 0.07, kinds: ['spray'], age: [0.3, 0.8] },
+    combs:  { chance: 0, kinds: [], age: [0, 1] },
+  },
 };
 
 // Left-behind human objects. Objects arrive in small SCENES: a chair with
@@ -209,9 +242,10 @@ export const GUN = {
   glintFor: 0.7,
   footstepsAfter: 18,
   trailAfter: 28,
-  progressLock: 0.8,        // getting this much closer makes the site persistent
+  progressLock: 0.8,        // getting this much closer earns more search time
+  committedFor: 70,         // ...but can never strand the gun for a whole run
   // From this placement on it stops caring about being out of your view cone
-  // and starts appearing wherever it can, including in front of you.
+  // and arrives almost directly ahead during a flashlight failure.
   patienceRuns: 2,
   pickupScale: 2.6,         // the world pickup is scaled up to be findable
   magazine: 12,             // total rounds. That is all you get.
@@ -338,13 +372,79 @@ export const STUTTER = {
 // one. A room you recognise should not be a safe room.
 export const LANDMARK_EVENTS = {
   cooldown: 22,             // seconds before another landmark can fire one
+  // After `delay` the room is ready, but it does not go off into the back of
+  // your head. It waits for you to be facing enough of the formation for the
+  // formation to read as one — see _fireRitual — and only after this many more
+  // seconds does it stop waiting and take whatever it can get. Long enough to
+  // turn round in; short enough that a room never feels like it owes you.
+  patience: 6.0,
+  // Leave the room before it fires and it does not fire. The event is not spent,
+  // the landmark is not burned, and it is still there the next time you are.
+  // Measured from the block centre, in cells — a shade past the corner of a
+  // 14-cell block, so standing in the doorway still counts as being in it.
+  holdWithin: 10.5,
   // Which room does what. `eyes` counts pairs; `delay` is how long you get to
-  // stand in the room before it happens.
+  // stand in the room before it is ready.
   ward:   { kind: 'ranks',  eyes: 6, delay: [1.2, 2.6] },
   atrium: { kind: 'circle', eyes: 5, delay: [1.8, 3.4] },
   shaft:  { kind: 'below',  eyes: 3, delay: [1.0, 2.2] },
   combs:  { kind: 'lattice', eyes: 8, delay: [2.0, 4.0] },
   chapel: { kind: 'altar',  eyes: 1, delay: [1.4, 2.8] },
+};
+
+// What a landmark does when you walk into it.
+//
+// The problem this solves is that you could stand in the middle of a room that
+// was drawn by hand and have no way of knowing. Shape is the hardest channel to
+// read at 480x270 through fog at eye level, and it was the only channel a
+// landmark had.
+//
+// THERE IS NO COUNTER, AND THERE WILL NOT BE. "1 of 5 found" would turn the best
+// rooms in the building into collectibles and the walk into an errand. Two tiers
+// instead, and neither of them is a number:
+//
+//   FIRST TIME — no words at all. The building stops for a beat: the mix ducks,
+//   the fog thins a shade so you can see further into the room than you could a
+//   moment ago, and the room plays its own note, quietly. That note is the SAME
+//   instrument its ritual uses, so the two get learnt as one thing and the entry
+//   becomes an omen for the event.
+//
+//   SECOND TIME, and only the second, and only once per kind of room — one line.
+//   Not "you found a landmark": something about having been here before. The
+//   horror of this building is recognition, not collection, and world.js has
+//   said so from the start — knowing where you are is much worse than not
+//   knowing. The line is the moment that lands.
+export const LANDMARK_VOICE = {
+  hushFor: 1.35,            // seconds the room holds its breath
+  hushFog: 0.34,            // ...and how far the fog opens while it does
+  duckTo: 0.26,             // master gain during the hush
+  duckHold: 0.55,
+  noteVolume: 0.16,         // the room's own sound, well under its ritual
+  // A beat before the words. Walking through a doorway and being handed text on
+  // the same frame reads as a trigger volume; a second and a half later reads as
+  // something occurring to you.
+  lineAfter: [1.3, 2.1],
+  lines: {
+    ward:   'the same six doors',
+    atrium: 'you have walked around this before',
+    shaft:  'it is the same drop',
+    combs:  'this row is the row you came down',
+    chapel: 'it was built to be walked down',
+  },
+};
+
+// Diegetic guidance toward rituals. The same five sounds used when the pistol
+// lands in a landmark recur occasionally after the weapon is no longer asking
+// for attention. Some phantom-step events also cross the player and continue
+// toward the target, using the gun guide's existing machinery.
+export const RITUAL_GUIDE = {
+  radius: 84,               // effectively always finds the nearest unused room
+  footstepRadius: 38,       // a walking cue must finish before it becomes a loop
+  firstAfter: [32, 48],
+  cueEvery: [38, 62],
+  busyRetry: [8, 14],
+  phantomChance: 0.42,
+  maxSteps: 34,
 };
 
 // The caught-you jumpscare. `enabled` is the small creature — off, because it
@@ -460,7 +560,13 @@ export const KEEP_AWAY = {
   eyes: 8.0,        // the single pair down the corridor
   swarm: 1.0,       // how much closer you may get to a swarm pair before it leaves
   crowd: 0.24,      // touching a body breaks the formation; the centre aisle is safe
-  ritual: 7.0,      // whatever the landmark events put in the room
+  // These two are APPROACH distances, not ranges — how much closer you may get
+  // to the nearest of them than you were when they appeared. The ritual entry
+  // used to be a flat range of 7.0, which every one of these events was already
+  // inside on the frame it fired (the ranks start four metres away), so nothing
+  // ever ran its own timer out. Same mistake and same fix as `swarm` above.
+  ritual: 2.6,
+  altar: 1.7,       // the chapel pair is one big thing; you may get nearer to it
 };
 
 // Spatial anomalies. Two of these (fog, silence) existed; the other four are
@@ -475,7 +581,13 @@ export const ANOMALIES = {
   // becomes a warning the player can learn instead of an unrelated filter.
   redshift:  { gate: 0.30, weight: 0, dur: [4.4, 5.2], lead: 2.4, chargeLead: 1.8 },
   blackout:  { gate: 0.38, weight: 2, dur: [3.4, 5.0] },  // the torch dies completely
-  crowd:     { gate: 0.46, weight: 1, dur: [8.0, 11.0], joinFor: 1.25 },
+  crowd:     {
+    gate: 0.46, weight: 1, dur: [8.0, 11.0], joinFor: 1.25,
+    // Twenty-two cells plus "unused only" made this ending disappear as soon as
+    // the nearby rooms had been explored. A congregation can reuse a landmark:
+    // the route and the missing place are the event, not the ritual's freshness.
+    targetRadius: 48,
+  },
 };
 
 // GRACE — the only thing in the game that is not the building winning.
@@ -490,11 +602,18 @@ export const ANOMALIES = {
 // worse, and now they also close the only door out, so the weapon becomes a
 // decision you make once and live inside rather than a resource you spend.
 export const GRACE = {
-  // Five witnessed rituals, or four and one held stare. At one landmark every
-  // minute or two of walking plus the 22 s cooldown between them, that is a
-  // five-to-eight minute run — long, deliberately. This is the ending you get
-  // for the walk you took seriously.
-  perRitual: 0.24,
+  // FOUR witnessed rituals, exactly. This was 0.24 — five rituals' worth — and
+  // the measured runs were the argument against it: a bot that did everything
+  // right four times sat at 0.96 for another four minutes waiting for a fifth
+  // landmark it never found, which is the worst number in the range. Four is
+  // already a real commitment at one landmark every minute or two plus the 22 s
+  // cooldown between events, and it is a promise the map can actually keep.
+  perRitual: 0.25,
+  // ...and it only counts if you actually stood there for it. Cumulative
+  // seconds of not moving while the ritual is up, or 55% of its life, whichever
+  // is less — so a short one is not unfairly strict and you may still shift your
+  // feet. Walking away while it happens to finish behind you is worth nothing.
+  witnessFor: 3.4,
   // Watching the creature is currently pure cost: it slows to a crawl while you
   // look at it, and looking at it is ground you do not make. This is the payoff.
   // You have to be still, it has to be close, and it has to be in your cone.
@@ -507,6 +626,82 @@ export const GRACE = {
   // players who learn that will read this without being told.
   calmFog: 0.10,            // fraction of the fog it thins at full grace
   calmTint: 0.07,           // how far toward cold the grade goes
+};
+
+// WITNESSING — how the building tells you what it wants, without telling you.
+//
+// The rule that opens the sixth ending is that you stop moving and let a thing
+// finish. That rule was, until this block existed, completely invisible: grace
+// is never shown, the award was silent, and the only feedback in the game was a
+// tenth of the fog thinning over four minutes. A player who never happened to
+// stand still through a ritual could not have deduced the mechanic from
+// anything on screen, which makes the best ending an accident rather than a
+// decision — and an accident is not worth having.
+//
+// THE FIX IS NOT A TUTORIAL AND IT IS NOT A METER. Landmarks already solved
+// this exact problem once, and the answer is in LANDMARK_VOICE: a wordless tier
+// that happens EVERY time, and a spoken tier that happens once, late, and is an
+// observation rather than an instruction. Same two tiers here.
+//
+//   WHILE IT IS HAPPENING — the fog opens, slowly, for as long as you are
+//   standing still, and closes when you move. That is the whole teaching
+//   mechanism and it is one number. The player has already been taught this
+//   sentence twice: the fog opens when you walk into a landmark (hushFog) and
+//   it is thinner the more grace you have (calmFog). Opening it a third time,
+//   under the one behaviour that earns the ending, finishes the association —
+//   the air gives when you do, and it is the only thing in the building that
+//   ever gives. Nobody has to be told they are doing it, because they can see
+//   it happen and they can see it stop.
+//
+//   ONCE IT HAS HAPPENED — the room plays its own note. The same note it played
+//   when you walked in and the same instrument its ritual just used, so the
+//   third hearing of it lands as "that was the room" rather than as a reward
+//   sound. There are no reward sounds in here.
+//
+//   AND THEN, TWICE, EVER — two lines. One when you let a ritual finish without
+//   standing for it, which is the diagnosis, and one when you have banked two,
+//   which is the confirmation. In that order for most players, which is the
+//   right order: you find out something was on offer, and then you find out
+//   what it was.
+export const WITNESS = {
+  // How far the fog opens at a full hold, and how long the hold takes to get
+  // there. Slower than the landmark hush on purpose — that one is a beat and
+  // this one is a decision, and you should be able to feel it still opening
+  // while you wonder whether to stay.
+  fog: 0.30,
+  openIn: 2.2,              // seconds of standing still to reach full
+  closeIn: 0.45,            // ...and how fast moving shuts it again
+
+  // A breath under it, at the point the hold has clearly become deliberate.
+  // Quiet enough that it is the room and not a chime.
+  noteAfter: 1.5,
+  noteVolume: 0.075,
+
+  // The room answering, once, at the moment the thing is banked.
+  bankNote: 0.19,
+  bankDuck: 0.34,
+
+  // THE AIR, BEFORE THERE IS A DOOR. Past this much grace the building starts
+  // moving air somewhere you cannot place — the door's own cue, with no
+  // direction on it and nothing at the end of it yet. It is guidance in the
+  // only honest sense: it tells you something is close without telling you
+  // where, and when a door finally does turn up it announces itself with the
+  // sound you have already spent a minute failing to locate.
+  airAt: 0.72,
+  airEvery: [9, 16],
+  airVolume: 0.055,
+
+  // Same register as LANDMARK_VOICE.lines: lower case, observational, and never
+  // an instruction. "Stand still" would be worth more to a player and cost the
+  // whole game.
+  lineAfter: [1.2, 2.0],
+  lines: {
+    missed: 'it finished without you',
+    kept: 'it was waiting for you to stop',
+    // Fired the once, on the round that closes the way out. Without this the
+    // most consequential decision in the game has no feedback whatsoever.
+    spent: 'the air has stopped moving',
+  },
 };
 
 // THE DOOR — what the building offers you instead of a gun.
@@ -575,6 +770,75 @@ export const OUTSIDE = {
   minHold: 6.5,             // and never before this, however fast you walk
   bleachFor: 2.4,           // the sky overexposing, which is the only white cut
                             // in a game where everything else ends in black
+
+  // WHAT IS STANDING IN IT. See terrain.js for the ground itself; this is the
+  // stuff on top of the ground, and there is a rule about all of it: nothing
+  // out here was PUT here. Every object in the building is something a person
+  // left behind, and every object in the field is something that grew, fell
+  // over, or was fenced — the one exception being the fence, which is the only
+  // evidence in the ending that anybody ever owned this and is worth having for
+  // exactly that reason.
+  //
+  // Density is per cell, and it is low. The painted treeline does the far
+  // distance (see skyTexture) and always will: what these are for is PARALLAX,
+  // the one cue a painted horizon cannot give you. Three real trees between you
+  // and the treeline tell the eye the treeline is half a mile away. Thirty of
+  // them tell it you are in a wood, which is a different ending.
+  field: {
+    // Thirty-six, not forty-six. Past about a hundred metres a tree is a mark
+    // three pixels wide and the painted treeline is already doing that job
+    // better and for nothing; all the extra ten cells bought was a scattering
+    // of specks between the real trees and the drawn ones, which read as dirt
+    // on the screen rather than as distance.
+    radius: 36,             // cells of field kept in the draw list at once
+    nearLOD: 21,            // ...beyond which a tree is drawn as its own stump
+    clearOfDoor: 5,         // nothing within this of where you are standing
+
+    // SMALL THINGS DO NOT GET THE FULL RADIUS. A tree at forty-six cells is a
+    // hundred and forty metres away and still eleven pixels tall; a clump of
+    // grass at fourteen is already one. Culling the small stuff early is the
+    // whole face budget — without these, most of what is in the draw list at
+    // any moment is tussocks contributing a pixel each, and the count triples.
+    reedRadius: 20,
+    tussockRadius: 13,
+    stoneRadius: 30,
+
+    // Trees thin out toward the middle of the field and thicken toward the
+    // edges of the region, which is where the painted line takes over. You walk
+    // out of cover, not into it.
+    treeChance: 0.0075,
+    treeEdgeBoost: 2.4,     // ...multiplied by this at the far edge
+    // A dead one standing in the water is worth four on dry land: it is the one
+    // object out here that gives the flood a scale, and a bare trunk with its
+    // reflection under it is the whole picture the ending is trying to make. So
+    // this is a per-cell chance like the one above and it is twice as high,
+    // over a much smaller area.
+    drownedChance: 0.016,
+    drownedDepth: [0.08, 0.62],
+    maxWadeDepth: 0.10,     // a living tree will not stand deeper than this
+
+    reedChance: 0.30,       // ...but only in the shallows, which is most of why
+    reedDepth: [0.02, 0.26],// there are so few of them
+    stoneChance: 0.006,     // ...and only on a real rise, or they are everywhere
+    stoneAbove: 0.85,
+    tussockChance: 0.010,
+    tussockAbove: 0.02,
+
+    // The fence. One line of it, running across the field rather than out of
+    // the door, so it crosses your walk instead of leading it — a fence you can
+    // follow is a corridor, and there has been enough of that.
+    //
+    // NEAR, AND SHORT. At thirty-one cells it sat exactly on the horizon and
+    // came out as an evenly spaced row of one-pixel sticks, which the chromatic
+    // fringing in the post chain then turned green and magenta — a picket line
+    // of fairy lights across the last shot of the game. Twelve puts it between
+    // you and the water, big enough to read as made of wood, and close enough
+    // that you go through it rather than looking at it.
+    fenceOut: 12,           // cells from the wall, at the doorway
+    fenceSpan: 34,          // half-length, in cells: a run, not a boundary
+    fenceEvery: 1.6,        // cells between posts — see fencePost, which draws
+                            // its own wire this far and no further
+  },
 };
 
 // How it ends.

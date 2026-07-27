@@ -54,6 +54,7 @@ import { WORLD, DECALS, OUTSIDE } from './config.js';
 import { fbm, seedSalt, noiseEpoch } from './noise.js';
 import { hash2 } from './mathutils.js';
 import { WALL_STYLES } from './textures.js';
+import { groundHeight, waterDepth } from './terrain.js';
 
 const { chunkSize, artery, arteryWander, districtWeights, landmarkChance, ceilings } = WORLD;
 
@@ -657,6 +658,31 @@ export class World {
   // a session that reached it. The props scatterer and the renderer both ask.
   isOutside(cx, cy) { return (this.flags(cx, cy) & OUTSIDE_CELL) !== 0; }
 
+  // --- the ground out there ---------------------------------------------------
+  // terrain.js is authored in cells measured FROM THE DOORWAY, because that is
+  // the frame the ending is written in. These two are the only place that
+  // conversion lives: the texture baker derives the same numbers from OUTSIDE
+  // directly, and if either drifts the water will be in a different place in
+  // the picture than it is under your feet.
+
+  fieldAcross(x) { return x - this.outside.doorX; }
+  fieldOut(y) { return this.outside.wallY - y; }
+
+  // How deep the water is at a world position, in metres — zero on dry land and
+  // zero anywhere in the building, which has other problems. The scatterer asks
+  // before it stands anything up, and the footsteps ask before they splash.
+  groundWater(x, y) {
+    if (!this.outside) return 0;
+    return waterDepth(this.fieldAcross(x), this.fieldOut(y));
+  }
+
+  // Signed height against the waterline, in metres. Only the scatterer wants
+  // this — a boulder belongs on a rise and a reed does not.
+  groundHeightAt(x, y) {
+    if (!this.outside) return 0;
+    return groundHeight(this.fieldAcross(x), this.fieldOut(y));
+  }
+
   // Cannot be walked into by anything that has any sense — which is everything
   // in the building except you. The player deliberately does NOT use this: see
   // player.js, where a hole is something you find out about on the way down.
@@ -741,9 +767,16 @@ export class World {
 
   // Which exposed face of this wall cell carries a blood smear?
   // -1 = none, 0 = west, 1 = east, 2 = north, 3 = south.
+  //
+  // The rate is per-block, not global: a landmark's walls are marked several
+  // times as often as a corridor's, and marked with the one thing that room is
+  // for. See DECALS.landmark, and bloodWallStyle below for the archetype.
   bloodWallFace(cx, cy) {
     if (!this.isWall(cx, cy)) return -1;
-    if (hash2(cx * 131 + cy * 53, cy * 97 + cx * 29) < 1 - DECALS.bloodWallChance) return -1;
+    const lm = DECALS.landmark[this.landmarkAt(cx, cy)];
+    const chance = lm ? lm.chance : DECALS.bloodWallChance;
+    if (chance <= 0) return -1;
+    if (hash2(cx * 131 + cy * 53, cy * 97 + cx * 29) < 1 - chance) return -1;
 
     const faces = [];
     if (!this.isWall(cx - 1, cy)) faces.push(0);
@@ -754,6 +787,22 @@ export class World {
 
     const pick = Math.floor(hash2(cx * 43 + 11, cy * 71 + 17) * faces.length);
     return faces[pick];
+  }
+
+  // What KIND of event this wall recorded, for the walls that belong to a room
+  // that was built on purpose: { kind, age } for a landmark, null everywhere
+  // else — and null means "roll it from the usual weights", which is what every
+  // generated district still does.
+  bloodWallStyle(cx, cy) {
+    const lm = DECALS.landmark[this.landmarkAt(cx, cy)];
+    if (!lm || !lm.kinds.length) return null;
+    const r = hash2(cx * 29 + 313, cy * 37 + 191);
+    return {
+      kind: lm.kinds[Math.min(lm.kinds.length - 1, (r * lm.kinds.length) | 0)],
+      // Age is authored per room too. A chapel tally is old — it was kept over a
+      // long time and then stopped being kept — and a ward corridor is not.
+      age: lm.age[0] + hash2(cx * 53 + 7, cy * 61 + 29) * (lm.age[1] - lm.age[0]),
+    };
   }
 
   // Spawn on the artery lattice. Anywhere else risks dropping the player into
